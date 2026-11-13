@@ -159,6 +159,7 @@ class GLView(QOpenGLWidget):
     rotationChanged = Signal()      # ausstehende Drehung hat sich geändert
     interactionFinished = Signal()  # Maus losgelassen
     fileDropped = Signal(str)
+    layFaceClicked = Signal(int)    # „Auf Fläche legen“: Fläche angeklickt
 
     MAX_DRAW = 3_000_000  # Vertices pro Draw-Call
 
@@ -192,6 +193,11 @@ class GLView(QOpenGLWidget):
         self._gl_ok = False
         self._last = None
         self._btn = None
+        self._press = None
+        # „Auf Fläche legen“
+        self.lay_mode = False
+        self.lay_faces = []   # Liste (poly (K,3) Welt, normal (3,))
+        self.lay_hover = -1
         self.message = "STL-Datei hier hineinziehen\noder über „Öffnen …“ laden"
 
     # ---------------------------------------------------- Daten
@@ -274,6 +280,51 @@ class GLView(QOpenGLWidget):
 
     def rotate_pending(self, axis, deg):
         self.set_pending(rot_axis(axis, deg) @ self.R_view)
+
+    # ---------------------------------------------------- Auf Fläche legen
+    def set_lay_mode(self, on, faces=None):
+        self.lay_mode = on
+        self.lay_faces = list(faces or []) if on else []
+        self.lay_hover = -1
+        self.setMouseTracking(on)
+        self.update()
+
+    def transform_lay(self, A):
+        """Kandidatenflächen mit einer 4x4-Transformation mitbewegen."""
+        R, t = A[:3, :3], A[:3, 3]
+        self.lay_faces = [(p @ R.T + t, R @ n) for p, n in self.lay_faces]
+        self.update()
+
+    def _ray(self, x, y):
+        P, V = self.matrices()
+        inv = np.linalg.inv(P @ V)
+        w, h = max(1, self.width()), max(1, self.height())
+        nx, ny = 2 * x / w - 1, 1 - 2 * y / h
+        a = inv @ np.array([nx, ny, -1.0, 1.0])
+        b = inv @ np.array([nx, ny, 1.0, 1.0])
+        a, b = a[:3] / a[3], b[:3] / b[3]
+        d = b - a
+        return a, d / np.linalg.norm(d)
+
+    def pick_lay(self, x, y):
+        if not self.lay_faces:
+            return -1
+        o, d = self._ray(x, y)
+        best, best_t = -1, np.inf
+        for i, (poly, n) in enumerate(self.lay_faces):
+            den = np.dot(n, d)
+            if abs(den) < 1e-12:
+                continue
+            t = np.dot(n, poly[0] - o) / den
+            if t >= best_t:
+                continue
+            q = o + t * d
+            # Punkt im konvexen Polygon? (alle Kreuzprodukte gleichsinnig zur Normalen)
+            e = np.roll(poly, -1, axis=0) - poly
+            c = np.einsum("ij,j->i", np.cross(e, q - poly), n)
+            if np.all(c >= -1e-9 * self.radius ** 2) or np.all(c <= 1e-9 * self.radius ** 2):
+                best, best_t = i, t
+        return best
 
     # ---------------------------------------------------- Kamera
     def cam_basis(self):
@@ -368,7 +419,7 @@ class GLView(QOpenGLWidget):
         s = self.radius * 1.15
 
         # --- Welt-Referenz (fest) -------------------------------------
-        if self._has_mesh and self.show_world:
+        if self._has_mesh and self.show_world and not self.lay_mode:
             gl.glEnable(gl.GL_BLEND)
             gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
             verts, cols = [], []
@@ -420,7 +471,7 @@ class GLView(QOpenGLWidget):
             gl.glBindBuffer(gl.GL_ARRAY_BUFFER, 0)
 
         # --- Objektebenen / -achsen (drehen mit) -----------------------
-        if self._has_mesh and (self.show_obj_planes or self.show_obj_axes):
+        if self._has_mesh and (self.show_obj_planes or self.show_obj_axes) and not self.lay_mode:
             M = affine(t=p) @ affine(self.R_view)
             gl.glEnable(gl.GL_BLEND)
             gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
@@ -450,6 +501,29 @@ class GLView(QOpenGLWidget):
                 self._draw_flat(av, ac, gl.GL_LINES, PV @ M)
                 gl.glLineWidth(1.0)
                 gl.glEnable(gl.GL_DEPTH_TEST)
+            gl.glDisable(gl.GL_BLEND)
+
+        # --- Kandidatenflächen „Auf Fläche legen“ -----------------------
+        if self._has_mesh and self.lay_mode and self.lay_faces:
+            gl.glEnable(gl.GL_BLEND)
+            gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+            tv, tc, lv, lc = [], [], [], []
+            eps = self.radius * 0.004
+            for i, (poly, n) in enumerate(self.lay_faces):
+                pp = poly + n * eps
+                hov = i == self.lay_hover
+                col = (0.96, 0.65, 0.14, 0.75) if hov else (0.95, 0.97, 1.0, 0.42)
+                for k in range(1, len(pp) - 1):
+                    tv += [pp[0], pp[k], pp[k + 1]]
+                    tc += [col] * 3
+                lcol = (1.0, 0.75, 0.25, 1.0) if hov else (1.0, 1.0, 1.0, 0.85)
+                for k in range(len(pp)):
+                    lv += [pp[k], pp[(k + 1) % len(pp)]]
+                    lc += [lcol] * 2
+            gl.glDepthMask(gl.GL_FALSE)
+            self._draw_flat(tv, tc, gl.GL_TRIANGLES, PV)
+            self._draw_flat(lv, lc, gl.GL_LINES, PV)
+            gl.glDepthMask(gl.GL_TRUE)
             gl.glDisable(gl.GL_BLEND)
 
         # --- Achsenkreuz unten links (Welt) ---------------------------
@@ -493,7 +567,7 @@ class GLView(QOpenGLWidget):
                 qp.setPen(QColor.fromRgbF(*col))
                 qp.drawText(QPointF(sx - 4, sy + 4), name)
             # Beschriftung Objektachsen
-            if self._has_mesh and self.show_obj_axes:
+            if self._has_mesh and self.show_obj_axes and not self.lay_mode:
                 p = self.pivot()
                 L = self.radius * 1.15 * 1.32
                 for i, (name, col) in enumerate((("X", C_X), ("Y", C_Y), ("Z", C_Z))):
@@ -507,7 +581,7 @@ class GLView(QOpenGLWidget):
                     qp.setPen(QColor.fromRgbF(*col))
                     qp.drawText(QPointF((nx + 1) / 2 * w - 4, (1 - ny) / 2 * h + 4), name)
             # Beschriftung Objektebenen
-            if self._has_mesh and self.show_obj_planes:
+            if self._has_mesh and self.show_obj_planes and not self.lay_mode:
                 p = self.pivot()
                 s = self.radius * 1.15
                 f2 = QFont("Consolas", 9)
@@ -523,23 +597,48 @@ class GLView(QOpenGLWidget):
             # Hinweis Steuerung
             qp.setPen(QColor(90, 104, 120))
             qp.setFont(QFont("Segoe UI", 8))
-            qp.drawText(0, 0, w - 10, h - 6, Qt.AlignRight | Qt.AlignBottom,
-                        "Links ziehen: Objekt drehen  ·  Strg+Links: um Blickachse  ·  "
-                        "Rechts: Ansicht drehen  ·  Mitte/Umschalt+Rechts: verschieben  ·  Rad: Zoom")
+            if self.lay_mode:
+                qp.setPen(QColor(245, 165, 36))
+                qp.setFont(QFont("Segoe UI", 10))
+                qp.drawText(0, 10, w, 30, Qt.AlignHCenter | Qt.AlignTop,
+                            f"AUF FLÄCHE LEGEN – {len(self.lay_faces)} ebene Flächen · Fläche anklicken · Esc beendet")
+                qp.setPen(QColor(90, 104, 120))
+                qp.setFont(QFont("Segoe UI", 8))
+                qp.drawText(0, 0, w - 10, h - 6, Qt.AlignRight | Qt.AlignBottom,
+                            "Klicken: Fläche wählen  ·  Links/Rechts ziehen: Ansicht drehen  ·  "
+                            "Mitte/Umschalt+Rechts: verschieben  ·  Rad: Zoom")
+            else:
+                qp.drawText(0, 0, w - 10, h - 6, Qt.AlignRight | Qt.AlignBottom,
+                            "Links ziehen: Objekt drehen  ·  Strg+Links: um Blickachse  ·  "
+                            "Rechts: Ansicht drehen  ·  Mitte/Umschalt+Rechts: verschieben  ·  Rad: Zoom")
         qp.end()
 
     # ---------------------------------------------------- Maus
     def mousePressEvent(self, e):
         self._last = e.position()
+        self._press = e.position()
         self._btn = e.button()
 
     def mouseReleaseEvent(self, e):
-        if self._btn == Qt.LeftButton:
+        if self.lay_mode and self._btn == Qt.LeftButton and self._press is not None:
+            moved = (e.position() - self._press).manhattanLength()
+            if moved < 5:
+                i = self.pick_lay(e.position().x(), e.position().y())
+                if i >= 0:
+                    self.layFaceClicked.emit(i)
+        elif self._btn == Qt.LeftButton:
             self.interactionFinished.emit()
         self._last = None
         self._btn = None
+        self._press = None
 
     def mouseMoveEvent(self, e):
+        if self.lay_mode and self._last is None:
+            i = self.pick_lay(e.position().x(), e.position().y())
+            if i != self.lay_hover:
+                self.lay_hover = i
+                self.update()
+            return
         if self._last is None:
             return
         pos = e.position()
@@ -547,7 +646,10 @@ class GLView(QOpenGLWidget):
         self._last = pos
         mods = e.modifiers()
         right, up, back = self.cam_basis()
-        if self._btn == Qt.LeftButton and self._has_mesh:
+        if self.lay_mode and self._btn == Qt.LeftButton:
+            self.az -= dx * 0.4
+            self.el = max(-90.0, min(90.0, self.el + dy * 0.4))
+        elif self._btn == Qt.LeftButton and self._has_mesh:
             if mods & Qt.ControlModifier:
                 R = rot_axis(back, -dx * 0.4)
             else:

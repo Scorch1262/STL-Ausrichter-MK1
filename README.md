@@ -1,4 +1,4 @@
-# STL-Ausrichter-MK1 · v1.1.0
+# STL-Ausrichter-MK1 · v1.2.0
 
 STL-Dateien öffnen, frei im Raum drehen, die X/Y/Z-Achsen und -Ebenen gerade zur
 angezeigten Lage ausrichten und die Datei **strukturgleich** wieder speichern –
@@ -21,6 +21,8 @@ Das Programm ist **eine einzelne exe** – ohne daneben liegende Dateien oder Or
 | Zoom | Mausrad |
 | Genau drehen | Winkelfelder X/Y/Z oder Knöpfe −90 / −1 / +1 / +90 |
 | Lage übernehmen | **ACHSEN AUSRICHTEN** (Strg+Enter) |
+| Auf Fläche legen | **FLÄCHEN ANZEIGEN** (F) → Fläche anklicken · Esc beendet |
+| Ursprung in Körpermitte | „Ursprung jetzt in Körpermitte setzen“ |
 | Drehung verwerfen | Esc |
 | Ausgerichtet speichern (verlustfrei) | „Speichern unter …“ (Strg+Umschalt+S) |
 | STEP erzeugen (optional) | „Als STEP (.stp) speichern …“ |
@@ -37,6 +39,38 @@ die soeben angezeigte Lage ist jetzt die neue Grundlage des Objekts.
 **Drehpunkt**
 * *Objektmitte (Lage bleibt)* – das Objekt dreht um seine Mitte, seine Position im Raum bleibt erhalten.
 * *Ursprung 0/0/0* – reine Drehung um den Koordinatenursprung.
+
+## Auf Fläche legen (wie in Bambu Studio – für alle drei Ebenen)
+
+![Auf Fläche legen](docs/screenshot_flaeche.png)
+
+1. **FLÄCHEN ANZEIGEN (F)** drücken. Wie bei „Auf Fläche legen“ in Bambu Studio werden alle
+   ausreichend großen, ebenen Flächen des Körpers als weiße Flächen eingeblendet
+   (berechnet über die konvexe Hülle; Hüllflächen mit gleicher Normale werden
+   zusammengefasst, zu kleine Flächen und schmale Streifen verworfen, max. 254 Flächen).
+   Die Fläche unter der Maus wird orange hervorgehoben.
+2. **Zielebene** wählen: XY, XZ oder YZ – jeweils mit Richtung (z. B. „XY – Fläche nach unten (−Z)“
+   entspricht dem Original: die Fläche liegt auf dem Druckbett).
+3. Fläche **anklicken** – das Objekt wird so gedreht, dass die Fläche auf der gewählten Ebene liegt.
+4. Danach wird der **Ursprung 0/0/0 in die Mitte des Körpers** gesetzt – wahlweise Mitte der
+   Begrenzungsbox oder Volumenschwerpunkt. Berechnet wird das **exakt über alle Dreiecke der
+   Datei** (nicht nur über die Anzeige).
+
+Zusätzliche Optionen:
+
+* **Längste Kante an Achse ausrichten** – dreht in der Ebene zusätzlich so, dass die längste
+  Kante der Fläche parallel zur nächstliegenden Achse liegt (bei kantigen Teilen sind damit alle
+  drei Achsen auf einen Klick gerade).
+* **Folge-Ebene** – nach dem ersten Legen kann eine Seitenfläche auf eine andere Ebene gelegt
+  werden (z. B. erst Boden auf XY, dann Seite auf XZ). Das Objekt dreht dann nur noch um die
+  bereits festgelegte Achse, die erste Fläche bleibt liegen.
+* **Ebenheit** – Toleranz in Grad, ab wann leicht unebene Bereiche (z. B. bei 3D-Scans) noch als
+  eine Fläche gelten.
+* Die Normale der gewählten Fläche wird über alle darauf liegenden Punkte nachgerechnet – bei
+  CAD-Dateien liegt die Fläche danach exakt in der Ebene.
+
+Auch das Legen ist verlustfrei: Es werden nur Drehung und Verschiebung gesetzt, gespeichert wird
+wie gewohnt mit „Speichern unter …“.
 
 ## Ausrichten & Speichern – immer ohne Komprimierung
 
@@ -93,6 +127,8 @@ python main.py [datei.stl]
 
 ## Versionen
 
+* **1.2.0** – „Auf Fläche legen“ (wie Bambu Studio) für XY/XZ/YZ mit Folge-Ebene,
+  Kantenausrichtung und Ursprung in Körpermitte (Box oder Volumenschwerpunkt, exakt).
 * **1.1.0** – Eine einzelne exe; STEP-Umwandlung (aus STL-STEP-Konverter-MK1) und Vereinfachen
   als Option; Screenshot im README.
 * **1.0.0** – Erstversion: Ansicht, Drehen, Achsen ausrichten, verlustfreies Speichern.

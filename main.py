@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBo
 import stl_io
 from version import APP_NAME, VERSION
 import jobs
+import layflat
 from viewer import GLView, R_to_euler, euler_to_R
 
 
@@ -63,6 +64,9 @@ QPushButton#primary {
 }
 QPushButton#primary:hover { background: #ffb840; }
 QPushButton#primary:disabled { background: #3a3220; color: #7a6a45; border-color: #3a3220; }
+QPushButton#lay { border-color: #f5a524; color: #f5a524; font-weight: 700; padding: 8px; }
+QPushButton#lay:hover { background: #2a2210; }
+QPushButton#lay:checked { background: #f5a524; color: #111; }
 QPushButton#teal { border-color: #2dd4bf; color: #2dd4bf; font-weight: 600; }
 QPushButton#teal:hover { background: #12302c; }
 QPushButton#small { padding: 4px 6px; font-family: Consolas, monospace; }
@@ -360,7 +364,7 @@ class MainWindow(QMainWindow):
                 b = QPushButton(f"{deg:+d}")
                 b.setObjectName("small")
                 b.setFixedWidth(40)
-                b.clicked.connect(lambda _=False, a=tuple(axis), d=deg: self.view.rotate_pending(a, d))
+                b.clicked.connect(lambda _=False, a=tuple(axis), d=deg: (self._unlock(), self.view.rotate_pending(a, d)))
                 g.addWidget(b, i, 2 + j)
         l.addLayout(g)
         row = QHBoxLayout()
@@ -386,6 +390,70 @@ class MainWindow(QMainWindow):
         self.lbl_pending.setWordWrap(True)
         l.addWidget(self.lbl_pending)
         side.addWidget(c)
+
+        # Karte: Auf Fläche legen -------------------------------------------
+        c, l = card("Auf Fläche legen")
+        hint = QLabel("Zeigt die ebenen Flächen des Körpers (wie „Auf Fläche legen“ in "
+                      "Bambu Studio). Angeklickte Fläche wird auf die gewählte Ebene gelegt.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        l.addWidget(hint)
+        self.btn_lay = QPushButton("FLÄCHEN ANZEIGEN  (F)")
+        self.btn_lay.setObjectName("lay")
+        self.btn_lay.setCheckable(True)
+        l.addWidget(self.btn_lay)
+        g = QGridLayout()
+        g.setHorizontalSpacing(8)
+        g.setVerticalSpacing(6)
+        lab = QLabel("Zielebene")
+        lab.setObjectName("muted")
+        self.cmb_target = QComboBox()
+        for txt, d in layflat.TARGETS:
+            self.cmb_target.addItem(txt, d)
+        g.addWidget(lab, 0, 0)
+        g.addWidget(self.cmb_target, 0, 1)
+        lab = QLabel("Ursprung")
+        lab.setObjectName("muted")
+        self.cmb_origin = QComboBox()
+        self.cmb_origin.addItem("Mitte des Körpers (Box)", "box")
+        self.cmb_origin.addItem("Volumenschwerpunkt", "centroid")
+        self.cmb_origin.addItem("nicht verschieben", "none")
+        self.cmb_origin.setToolTip("Wohin der Ursprung 0/0/0 nach dem Legen gesetzt wird.\n"
+                                   "Wird exakt über ALLE Dreiecke der Datei berechnet.")
+        g.addWidget(lab, 1, 0)
+        g.addWidget(self.cmb_origin, 1, 1)
+        lab = QLabel("Ebenheit")
+        lab.setObjectName("muted")
+        self.spn_flat = QDoubleSpinBox()
+        self.spn_flat.setRange(0.1, 10.0)
+        self.spn_flat.setDecimals(1)
+        self.spn_flat.setSingleStep(0.5)
+        self.spn_flat.setValue(1.0)
+        self.spn_flat.setSuffix(" °")
+        self.spn_flat.setToolTip("Wie stark Teilflächen voneinander abweichen dürfen, um noch als\n"
+                                 "eine ebene Fläche zu gelten (größer = toleranter, z. B. für Scans).")
+        g.addWidget(lab, 2, 0)
+        g.addWidget(self.spn_flat, 2, 1)
+        l.addLayout(g)
+        self.chk_edge = QCheckBox("Längste Kante an Achse ausrichten")
+        self.chk_edge.setChecked(True)
+        self.chk_edge.setToolTip("Dreht zusätzlich in der Ebene, bis die längste Kante der Fläche\n"
+                                 "parallel zur nächstliegenden Achse liegt.")
+        self.chk_follow = QCheckBox("Folge-Ebene: vorherige Lage beibehalten")
+        self.chk_follow.setChecked(True)
+        self.chk_follow.setToolTip("Wird nach dem ersten Legen eine seitliche Fläche auf eine andere\n"
+                                   "Ebene gelegt, dreht das Objekt nur noch um die bereits\n"
+                                   "festgelegte Achse – die erste Fläche bleibt liegen.")
+        l.addWidget(self.chk_edge)
+        l.addWidget(self.chk_follow)
+        self.btn_center = QPushButton("Ursprung jetzt in Körpermitte setzen")
+        l.addWidget(self.btn_center)
+        self.lbl_lay = QLabel("")
+        self.lbl_lay.setObjectName("hint")
+        self.lbl_lay.setWordWrap(True)
+        l.addWidget(self.lbl_lay)
+        side.addWidget(c)
+        self.lay_lock = []
 
         # Karte: Gesamtänderung ------------------------------------------
         c, l = card("Übernommene Änderung")
@@ -503,8 +571,11 @@ class MainWindow(QMainWindow):
         m.addAction(QAction("Beenden", self, shortcut=QKeySequence.Quit, triggered=self.close))
         m = self.menuBar().addMenu("&Bearbeiten")
         m.addAction(QAction("Achsen ausrichten", self, shortcut=QKeySequence("Ctrl+Return"), triggered=self.bake))
-        m.addAction(QAction("Drehung verwerfen", self, shortcut=QKeySequence("Esc"),
-                            triggered=self.view.reset_pending))
+        m.addAction(QAction("Drehung verwerfen / Flächenmodus beenden", self, shortcut=QKeySequence("Esc"),
+                            triggered=self.on_escape))
+        m.addAction(QAction("Auf Fläche legen", self, shortcut=QKeySequence("F"),
+                            triggered=lambda: self.btn_lay.isEnabled() and self.btn_lay.click()))
+        m.addAction(QAction("Ursprung in Körpermitte setzen", self, triggered=self.center_origin))
         m = self.menuBar().addMenu("&Hilfe")
         m.addAction(QAction("Über …", self, triggered=self.about))
 
@@ -520,6 +591,10 @@ class MainWindow(QMainWindow):
         self.cmb_pivot.currentIndexChanged.connect(self.on_pivot)
         self.view.rotationChanged.connect(self.on_rotation_changed)
         self.view.interactionFinished.connect(self.update_dims)
+        self.view.interactionFinished.connect(self._unlock)
+        self.view.layFaceClicked.connect(self.on_lay_face)
+        self.btn_lay.toggled.connect(self.on_lay_toggled)
+        self.btn_center.clicked.connect(self.center_origin)
         self.view.fileDropped.connect(self.load)
         self._dims_timer = QTimer(self, singleShot=True, interval=150, timeout=self.update_dims)
         self.set_enabled(False)
@@ -527,9 +602,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ Status
     def set_enabled(self, has_file):
         busy = self.worker is not None
-        for w in (self.btn_save, self.btn_bake, self.btn_reset_pending, self.btn_reset_all,
-                  self.cmb_pivot, self.btn_step, self.btn_simplify, *self.spins):
+        lay = self.view.lay_mode
+        for w in (self.btn_save, self.btn_reset_all, self.btn_step, self.btn_simplify,
+                  self.btn_lay, self.btn_center, self.cmb_target, self.cmb_origin):
             w.setEnabled(has_file and not busy)
+        for w in (self.btn_bake, self.btn_reset_pending, self.cmb_pivot, self.spn_flat, *self.spins,
+                  *self.findChildren(QPushButton, "small")):
+            w.setEnabled(has_file and not busy and not lay)
         self.btn_open.setEnabled(not busy)
         self.cmb_detail.setEnabled(not busy)
 
@@ -573,6 +652,8 @@ class MainWindow(QMainWindow):
             r = QMessageBox.question(self, APP_NAME, "Es gibt nicht gespeicherte Änderungen.\nTrotzdem neue Datei laden?")
             if r != QMessageBox.Yes:
                 return
+        self.btn_lay.setChecked(False)
+        self.lay_lock = []
         self._t0 = time.time()
         self.busy(True, "Lade …")
         self.view.clear_mesh("Lade …")
@@ -633,6 +714,7 @@ class MainWindow(QMainWindow):
         if self._updating:
             return
         rx, ry, rz = (s.value() for s in self.spins)
+        self._unlock()
         self.view.set_pending(euler_to_R(rx, ry, rz))
         self._dims_timer.start()
 
@@ -666,14 +748,154 @@ class MainWindow(QMainWindow):
     def bake(self):
         if not self.info:
             return
+        if self.has_pending():
+            self._unlock()
         self.view.bake()
         self.update_dims()
         self.lbl_status.setText("Achsen ausgerichtet – Objektebenen stehen jetzt gerade. "
                                 "Mit „Speichern unter …“ sichern.")
 
     def reset_all(self):
+        self.btn_lay.setChecked(False)
+        self._unlock()
         self.view.reset_all()
         self.update_dims()
+
+    # ------------------------------------------------------------ Auf Fläche legen
+    def _unlock(self):
+        self.lay_lock = []
+
+    def on_escape(self):
+        if self.view.lay_mode or self.btn_lay.isChecked():
+            self.btn_lay.setChecked(False)
+        else:
+            self.view.reset_pending()
+
+    def _world_points(self, max_pts=None):
+        p = self.info.sample.reshape(-1, 3)
+        if max_pts and len(p) > max_pts:
+            p = p[:: len(p) // max_pts]
+        return p.astype(np.float64) @ self.view.R_total.T + self.view.t_total
+
+    def on_lay_toggled(self, on):
+        if not on:
+            if self.worker and getattr(self, "_lay_computing", False):
+                self.worker.cancel()
+            self.view.set_lay_mode(False)
+            self.lbl_lay.setText("")
+            self.set_enabled(self.info is not None)
+            return
+        if not self.info or self.worker:
+            self.btn_lay.setChecked(False)
+            return
+        if self.has_pending():
+            self.view.bake()   # angezeigte Drehung übernehmen, Flächen gelten für die aktuelle Lage
+        pts = self._world_points()
+        self._t0 = time.time()
+        self._lay_computing = True
+        self.busy(True, "Suche ebene Flächen …")
+        tol = self.spn_flat.value()
+        self.worker = Worker(lambda pts, progress=None, cancel=None:
+                             layflat.compute_candidates(pts, tol, progress), pts)
+        self.worker.progress.connect(self.on_progress)
+        self.worker.done.connect(self.on_lay_ready)
+        self.worker.failed.connect(self.on_lay_failed)
+        self.set_enabled(True)
+        self.worker.start()
+
+    def on_lay_ready(self, cands):
+        self._lay_computing = False
+        self._finish_worker()
+        if not self.btn_lay.isChecked():
+            self.set_enabled(True)
+            return
+        self.view.set_lay_mode(True, [(c["poly"], c["normal"]) for c in cands])
+        self.set_enabled(True)
+        self.lbl_status.setText(f"{len(cands)} ebene Flächen gefunden – Fläche im 3D-Fenster anklicken.")
+        self.lbl_lay.setText("Fläche anklicken. Mehrfach möglich: z. B. erst Boden auf XY, "
+                             "dann eine Seitenfläche auf XZ.")
+
+    def on_lay_failed(self, msg):
+        self._lay_computing = False
+        self._finish_worker()
+        self.btn_lay.setChecked(False)
+        self.set_enabled(True)
+        if msg != "__abgebrochen__":
+            QMessageBox.critical(self, APP_NAME, f"Flächen konnten nicht ermittelt werden:\n\n{msg}")
+
+    def on_lay_face(self, idx):
+        if self.worker or idx < 0 or idx >= len(self.view.lay_faces):
+            return
+        poly, n = self.view.lay_faces[idx]
+        size = 2 * self.view.radius
+        n_ref = layflat.refine_normal(self._world_points(), {"normal": n, "offset": float(poly[0] @ n)}, size)
+        d = np.array(self.cmb_target.currentData(), dtype=float)
+        lock = self.lay_lock if self.chk_follow.isChecked() else []
+        R, new_lock, desc = layflat.lay_rotation(n_ref, poly, d, lock, self.chk_edge.isChecked())
+        A_old = self.view.total_affine()
+        self.view.set_pending(R)
+        self.view.bake()
+        A_new = self.view.total_affine()
+        self.view.transform_lay(A_new @ np.linalg.inv(A_old))
+        self.lay_lock = new_lock
+        self.update_dims()
+        plane = self.cmb_target.currentText().split(" ")[0]
+        self.lbl_lay.setText(f"✔ {desc}: Fläche auf {plane}." + (
+            "  Nächste Fläche auf eine andere Ebene legen, um auch die übrigen Achsen festzulegen."
+            if len(new_lock) == 1 else "  Alle drei Achsen sind festgelegt."))
+        if self.cmb_origin.currentData() != "none":
+            self.center_origin()
+        else:
+            self.lbl_status.setText("Fläche gelegt.")
+
+    def center_origin(self):
+        if not self.info or self.worker:
+            return
+        if self.has_pending():
+            self.view.bake()
+        mode = self.cmb_origin.currentData()
+        if mode == "none":
+            mode = "box"
+        self._center_mode = mode
+        self._t0 = time.time()
+        self.busy(True, "Ermittle exakte Maße …")
+        self.worker = Worker(stl_io.compute_bounds, self.info.path,
+                             self.view.R_total.copy(), self.view.t_total.copy())
+        self.worker.progress.connect(self.on_progress)
+        self.worker.done.connect(self.on_center_done)
+        self.worker.failed.connect(self.on_center_failed)
+        self.set_enabled(True)
+        self.worker.start()
+
+    def on_center_done(self, b):
+        self._finish_worker()
+        c = b["center"]
+        note = "Mitte der Begrenzungsbox"
+        if self._center_mode == "centroid":
+            if b["centroid"] is not None and np.all(np.isfinite(b["centroid"])):
+                c = b["centroid"]
+                note = "Volumenschwerpunkt"
+            else:
+                note = "Mitte der Begrenzungsbox (Körper nicht geschlossen – kein Schwerpunkt)"
+        c = np.asarray(c, dtype=float)
+        self.view.t_total = self.view.t_total - c
+        A = np.eye(4)
+        A[:3, 3] = -c
+        self.view.transform_lay(A)
+        self.view.target = self.view.target - c
+        self.view.update()
+        self.set_enabled(True)
+        self.on_rotation_changed()
+        ext = b["max"] - b["min"]
+        self.v_dims.setText(" × ".join(fmt_num(x, 2) for x in ext))
+        self.lbl_status.setText(f"Ursprung gesetzt ({note}). Exakte Maße: "
+                                + " × ".join(fmt_num(x, 3) for x in ext))
+
+    def on_center_failed(self, msg):
+        self._finish_worker()
+        self.set_enabled(True)
+        if msg != "__abgebrochen__":
+            QMessageBox.critical(self, APP_NAME, f"Maße konnten nicht ermittelt werden:\n\n{msg}")
 
     def on_pivot(self):
         self.view.pivot_center = bool(self.cmb_pivot.currentData())
