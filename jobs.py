@@ -101,8 +101,22 @@ def step_job(src, dst, R, t, settings_dict, workdir, queue):
         from converter import ConversionSettings, ConversionError, convert_stl_to_step
         inp, aligned = _transform_first(src, R, t, put, (0, 10), workdir)
         off = 10 if aligned else 0
+        scan = settings_dict.pop("scan", None)
         settings = ConversionSettings(**settings_dict)
-        if settings.decimate_percent < 100 or settings.smoothing_iterations > 0:
+        scan_stats = None
+        if scan:
+            from scanprep import prepare_scan
+            pre = os.path.join(workdir, "scan_aufbereitet.stl")
+            a = off
+            scan_stats = prepare_scan(
+                inp, pre, smoothing=settings.smoothing_iterations, **scan,
+                cb=lambda p, m: put(("progress", a + int(p * 45 / 100), "Scan-Aufbereitung: " + m)))
+            _cleanup(inp)
+            inp = pre
+            off = a + 45
+            settings.decimate_percent = 100
+            settings.smoothing_iterations = 0
+        elif settings.decimate_percent < 100 or settings.smoothing_iterations > 0:
             pre = os.path.join(workdir, "vereinfacht.stl")
             a = off
             simplify_file(inp, pre, settings.decimate_percent, settings.smoothing_iterations,
@@ -126,7 +140,29 @@ def step_job(src, dst, R, t, settings_dict, workdir, queue):
             "faces_after": res.face_count_after,
             "volume": res.volume,
             "shapes": [(s.kind, round(s.radius, 3), s.replaced) for s in res.detected_shapes],
+            "scan": scan_stats,
         }))
+    except Exception as e:  # noqa
+        traceback.print_exc()
+        put(("error", str(e)))
+    finally:
+        _cleanup(inp)
+
+
+def scan_job(src, dst, R, t, settings_dict, workdir, queue):
+    """Nur die Scan-Aufbereitung, Ergebnis als STL."""
+    put = queue.put
+    inp = src
+    try:
+        from scanprep import prepare_scan
+        inp, aligned = _transform_first(src, R, t, put, (0, 10), workdir)
+        off = 10 if aligned else 0
+        part = dst + ".teil.stl"
+        st = prepare_scan(inp, part, smoothing=settings_dict.get("smoothing_iterations", 0),
+                          **settings_dict["scan"],
+                          cb=lambda p, m: put(("progress", off + int(p * (100 - off) / 100), m)))
+        os.replace(part, dst)
+        put(("done", {"path": dst, "scan": st}))
     except Exception as e:  # noqa
         traceback.print_exc()
         put(("error", str(e)))

@@ -79,7 +79,9 @@ from OCP.GProp import GProp_GProps
 from OCP.Bnd import Bnd_Box
 from OCP.BRepBndLib import BRepBndLib
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
-from OCP.gp import gp_Pnt, gp_Dir, gp_Ax3, gp_Cylinder, gp_Sphere
+from OCP.gp import gp_Pnt, gp_Dir, gp_Ax3, gp_Cylinder, gp_Sphere, gp_Pln
+from OCP.Interface import Interface_Static
+from OCP.BRepLib import BRepLib
 from OCP.BRepPrimAPI import BRepPrimAPI_MakeSphere
 from OCP.BRepOffsetAPI import BRepOffsetAPI_MakeFilling
 from OCP.GeomAPI import GeomAPI_PointsToBSplineSurface
@@ -121,6 +123,7 @@ ProgressCallback = Callable[[int, str], None]
 # (Meldung an den Nutzer), Naehen + Volumenkoerper-Aufbau laeuft aber
 # immer, unabhaengig von der Groesse.
 MAX_FACES_FOR_CURVE_DETECTION = 300_000
+MAX_FACES_FOR_REPLACEMENT = 30_000   # darueber kein analytisches Ersetzen (siehe oben)
 # Wicklungs-REPARATUR (nicht die reine, immer schnelle Pruefung) kann
 # bei sehr grossen Netzen drastisch einbrechen statt sanft zu skalieren
 # (siehe Kommentar bei _preprocess_mesh) - deshalb eigene, groessere
@@ -192,6 +195,8 @@ class ConversionSettings:
     detect_curved_shapes: bool = True  # Zylinder/Kugeln erkennen UND ersetzen
     smooth_scan_surfaces: bool = False  # unebene Scan-Flaechen in glatte NURBS umwandeln
     worker_count: int = 0               # 0 = automatisch (alle Kerne)
+    thorough_verify: bool = False       # geschriebene Datei neu einlesen und pruefen (langsam)
+    compact_step: bool = False          # ohne P-Kurven schreiben (kleiner/schneller)
 
     @classmethod
     def from_form(cls, form: dict) -> "ConversionSettings":
@@ -339,7 +344,140 @@ def _angular_gap_ok(points: np.ndarray, center: np.ndarray, axis: np.ndarray) ->
     return math.degrees(max_gap) < MAX_ANGULAR_GAP_DEG
 
 
+def _fit_cylinder_ls(points, normals):
+    """Zylinder per Ausgleichsrechnung: Achse = Richtung, zu der alle
+    Facettennormalen senkrecht stehen (kleinster Singulaerwert), danach
+    Kreis-Ausgleich (Kasa) in der Ebene senkrecht zur Achse."""
+    nn = normals[np.linalg.norm(normals, axis=1) > 0.5]
+    if len(nn) < 3:
+        return None
+    _, sv, vt = np.linalg.svd(nn, full_matrices=False)
+    axis = vt[-1]
+    axis /= np.linalg.norm(axis)
+    u = np.cross(axis, [1.0, 0, 0] if abs(axis[0]) < 0.9 else [0, 1.0, 0])
+    u /= np.linalg.norm(u)
+    v = np.cross(axis, u)
+    c0 = points.mean(axis=0)
+    rel = points - c0
+    x, y = rel @ u, rel @ v
+    A = np.column_stack([x, y, np.ones_like(x)])
+    sol, *_ = np.linalg.lstsq(A, x * x + y * y, rcond=None)
+    cx, cy = sol[0] / 2, sol[1] / 2
+    r2 = sol[2] + cx * cx + cy * cy
+    if not (r2 > 0):
+        return None
+    center = c0 + cx * u + cy * v
+    return center, axis, float(np.sqrt(r2))
+
+
+def _fit_sphere_ls(points):
+    A = np.column_stack([2 * points, np.ones(len(points))])
+    b = (points * points).sum(axis=1)
+    sol, *_ = np.linalg.lstsq(A, b, rcond=None)
+    c = sol[:3]
+    r2 = sol[3] + c @ c
+    if not (r2 > 0):
+        return None
+    return c, float(np.sqrt(r2))
+
+
 def _fit_region(points: np.ndarray, thresh: float, max_ransac_points: int = 4000) -> Optional[dict]:
+    """Erkennt Zylinder/Kugel in einer Region.
+
+    Beschleunigt (STL-Ausrichter): statt RANSAC (pyransac3d, viele
+    Python-Iterationen) wird zuerst eine direkte Ausgleichsrechnung mit
+    zweifacher Ausreisser-Bereinigung verwendet - Millisekunden statt
+    Sekunden je Region. RANSAC wird nur noch als Rueckfallebene genutzt,
+    wenn die schnelle Anpassung knapp scheitert (z. B. viele Ausreisser).
+    points: Eckpunkte der Regionsdreiecke, immer 3 aufeinanderfolgende
+    Punkte bilden ein Dreieck (daraus werden die Normalen berechnet).
+    """
+    if len(points) < 12:
+        return None
+    pts = np.asarray(points, dtype=float)
+    tri = pts[: (len(pts) // 3) * 3].reshape(-1, 3, 3)
+    nrm = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    ln = np.linalg.norm(nrm, axis=1, keepdims=True)
+    nrm = np.where(ln > 0, nrm / np.where(ln > 0, ln, 1), 0)
+
+    def eval_cyl(center, axis, radius, P):
+        rel = P - center
+        axial = rel @ axis
+        radial = np.linalg.norm(rel - np.outer(axial, axis), axis=1)
+        return np.abs(radial - radius), axial
+
+    def eval_sph(center, radius, P):
+        return np.abs(np.linalg.norm(P - center, axis=1) - radius)
+
+    best = None
+    near = 0.0  # beste Trefferquote der schnellen Anpassungen
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        # --- Zylinder ---
+        try:
+            fit = _fit_cylinder_ls(pts, nrm)
+            for _ in range(2):  # Ausreisser entfernen, neu anpassen
+                if fit is None:
+                    break
+                d, _ax = eval_cyl(*fit, pts)
+                keep = d < 3 * thresh
+                kt = keep[: len(tri) * 3].reshape(-1, 3).all(axis=1)
+                if keep.sum() < 12 or kt.sum() < 3 or keep.all():
+                    break
+                fit = _fit_cylinder_ls(pts[keep], nrm[kt])
+            if fit is not None:
+                center, axis, radius = fit
+                d, axial = eval_cyl(center, axis, radius, pts)
+                ratio = float(np.mean(d < thresh))
+                near = max(near, ratio)
+                if ratio > 0.85:
+                    best = {"kind": "Zylinder", "radius": radius, "inlier_ratio": ratio,
+                            "center": center, "axis": axis,
+                            "v_min": float(axial.min()), "v_max": float(axial.max())}
+        except Exception:
+            pass
+        # --- Kugel ---
+        try:
+            fs = _fit_sphere_ls(pts)
+            for _ in range(2):
+                if fs is None:
+                    break
+                d = eval_sph(*fs, pts)
+                keep = d < 3 * thresh
+                if keep.sum() < 12 or keep.all():
+                    break
+                fs = _fit_sphere_ls(pts[keep])
+            if fs is not None:
+                center_s, radius_s = fs
+                ratio_s = float(np.mean(eval_sph(center_s, radius_s, pts) < thresh))
+                near = max(near, ratio_s)
+                if ratio_s > 0.85 and (best is None or ratio_s > best["inlier_ratio"]):
+                    best = _sphere_result(pts, center_s, radius_s, ratio_s) or best
+        except Exception:
+            pass
+
+    if best is None and pyrsc is not None and near >= 0.5:
+        # Rueckfallebene nur bei knappem Ergebnis (vermutlich Ausreisser):
+        # urspruengliches RANSAC-Verfahren. Eindeutig nicht runde Bereiche
+        # (z. B. Freiformflaechen von Scans) werden nicht mehr teuer geprueft.
+        return _fit_region_ransac(pts, thresh, max_ransac_points)
+    return best
+
+
+def _sphere_result(points, center_s, radius_s, ratio_s):
+    pole = (points.mean(axis=0) - center_s)
+    pole_norm = np.linalg.norm(pole)
+    if pole_norm <= 1e-9:
+        return None
+    pole = pole / pole_norm
+    rel = points - center_s
+    rel_unit = rel / np.linalg.norm(rel, axis=1, keepdims=True)
+    lat = np.arcsin(np.clip(rel_unit @ pole, -1.0, 1.0))
+    return {"kind": "Kugel", "radius": float(radius_s), "inlier_ratio": ratio_s,
+            "center": center_s, "axis": pole, "v_min": float(lat.min()), "v_max": float(lat.max())}
+
+
+def _fit_region_ransac(points: np.ndarray, thresh: float, max_ransac_points: int = 4000) -> Optional[dict]:
     """Laeuft in einem separaten Prozess (multiprocessing) - bekommt
     nur reine Zahlen (numpy-Array), keine OCCT-Objekte.
 
@@ -602,6 +740,12 @@ def _detect_and_replace_curves(
     n_faces = len(mesh.faces)
     if n_faces == 0 or n_faces > MAX_FACES_FOR_CURVE_DETECTION:
         return None, []
+    if n_faces > MAX_FACES_FOR_REPLACEMENT:
+        # STL-Ausrichter: Das Ersetzen erfordert ein erneutes Vernaehen ALLER
+        # Flaechen - bei Scan-Netzen mit vielen Dreiecken dauert das Minuten
+        # und scheitert wegen des Rauschens fast immer. Scans werden statt
+        # dessen vorab in scanprep.py eingepasst (Zylinder exakt gerundet).
+        return None, []
 
     triangles = mesh.triangles  # (n_faces, 3, 3)
     faces_unique_edges = mesh.faces_unique_edges
@@ -628,8 +772,11 @@ def _detect_and_replace_curves(
     if not candidates and not smooth_freeform:
         return None, []
 
-    workers = worker_count or max(1, multiprocessing.cpu_count() - 1)
-    workers = min(workers, len(candidates))
+    # STL-Ausrichter: Die schnelle Anpassung braucht nur Millisekunden je
+    # Region - ein Prozess-Pool (Start kostet unter Windows/in der exe
+    # Sekunden, und das bei Mehrkoerper-Dateien fuer JEDEN Koerper) lohnt
+    # sich nicht mehr.
+    workers = 1
 
     fits = [None] * len(candidates)
     if workers > 1:
@@ -981,6 +1128,201 @@ def _preprocess_mesh(input_path: str, settings: ConversionSettings, tmp_path: st
     return tmp_path, mesh
 
 
+def _bad_inner_wire_points(face):
+    """Bei „BadOrientationOfSubshape“: die schuldigen inneren Ränder (Löcher)
+    einer Fläche finden und deren Eckpunkte zurückgeben."""
+    from OCP.BRepTools import BRepTools
+    from OCP.BRepCheck import BRepCheck_Face
+    from OCP.TopAbs import TopAbs_WIRE
+    pts = []
+    try:
+        outer = BRepTools.OuterWire_s(face)
+        surf = BRep_Tool.Surface_s(face)
+        we = TopExp_Explorer(face, TopAbs_WIRE)
+        while we.More():
+            w = TopoDS.Wire(we.Current())
+            if not w.IsSame(outer):
+                mk = BRepBuilderAPI_MakeFace(surf, outer, True)
+                mk.Add(w)
+                if mk.IsDone():
+                    test = mk.Face()
+                    if BRepCheck_Face(test).OrientationOfWires(False) != BRepCheck_Status.BRepCheck_NoError:
+                        vx = TopExp_Explorer(w, TopAbs_VERTEX)
+                        while vx.More():
+                            pts.append(BRep_Tool.Pnt_s(TopoDS.Vertex(vx.Current())))
+                            vx.Next()
+            we.Next()
+    except Exception:
+        traceback.print_exc()
+    return pts
+
+
+def _unify_safe(shape, tol):
+    """Ebene Bereiche zusammenfassen (UnifySameDomain) – abgesichert.
+
+    Bei Scan-Daten kann ein zusammengefasster Bereich ungültig werden (z. B.
+    sich selbst berührender oder überschneidender Rand durch Rauschen).
+    Solche Stellen werden erkannt; die Ausgangsdreiecke direkt an der
+    Fehlerstelle werden vor dem Zusammenfassen geschützt (KeepShape) und der
+    Vorgang wiederholt. Nur diese wenigen Dreiecke bleiben einzeln, alles
+    andere wird zusammengefasst."""
+    from OCP.BRepCheck import BRepCheck_Wire
+    from OCP.TopoDS import TopoDS_Edge
+    from OCP.TopAbs import TopAbs_WIRE
+
+    def run(keep):
+        u = ShapeUpgrade_UnifySameDomain(shape, True, True, True)
+        u.SetLinearTolerance(tol)
+        u.SetAngularTolerance(1e-3)
+        for e in keep:
+            u.KeepShape(e)
+        u.Build()
+        return u
+
+    def vkey(p):
+        return (round(p.X() / tol), round(p.Y() / tol), round(p.Z() / tol))
+
+    # Index: Punkt -> Ausgangsdreiecke (nur bei Bedarf aufgebaut)
+    index = {}
+
+    def build_index():
+        ex = TopExp_Explorer(shape, TopAbs_FACE)
+        while ex.More():
+            f0 = ex.Current()
+            vx = TopExp_Explorer(f0, TopAbs_VERTEX)
+            while vx.More():
+                k = vkey(BRep_Tool.Pnt_s(TopoDS.Vertex(vx.Current())))
+                index.setdefault(k, []).append(f0)
+                vx.Next()
+            ex.Next()
+
+    def faces_at(p):
+        k = vkey(p)
+        out = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    out.extend(index.get((k[0] + dx, k[1] + dy, k[2] + dz), ()))
+        return out
+
+    keep = []
+    kept_faces = ShapeMap()
+    unify = run(keep)
+    for _attempt in range(8):
+        result = unify.Shape()
+        try:
+            _fix_merged_tolerances(result)
+        except Exception:
+            pass
+        bad = []
+        ex = TopExp_Explorer(result, TopAbs_FACE)
+        while ex.More():
+            f = ex.Current()
+            if not BRepCheck_Analyzer(f, True, False).IsValid():
+                bad.append(TopoDS.Face(f))
+            ex.Next()
+        # Offene Kanten (ein Dreieck ist beim Zusammenfassen verloren gegangen)
+        free_spots = []
+        try:
+            from OCP.ShapeAnalysis import ShapeAnalysis_FreeBounds
+            fb = ShapeAnalysis_FreeBounds(result, 1e-6, False, False)
+            for wires in (fb.GetClosedWires(), fb.GetOpenWires()):
+                vx = TopExp_Explorer(wires, TopAbs_VERTEX)
+                while vx.More():
+                    free_spots.append(BRep_Tool.Pnt_s(TopoDS.Vertex(vx.Current())))
+                    vx.Next()
+        except Exception:
+            traceback.print_exc()
+        if os.environ.get("STLA_DEBUG"):
+            print("unify attempt", _attempt, "bad faces", len(bad), "free", len(free_spots),
+                  "keep", len(keep), flush=True)
+        if not bad and not free_spots:
+            return result
+        if not index:
+            build_index()
+        n_keep = len(keep)
+        whole = []
+        for p in free_spots:
+            for f0 in faces_at(p):
+                if not kept_faces.Contains(f0):
+                    kept_faces.Add(f0)
+                    ee = TopExp_Explorer(f0, TopAbs_EDGE)
+                    while ee.More():
+                        keep.append(ee.Current())
+                        ee.Next()
+        for f in bad:
+            spots = []
+            we = TopExp_Explorer(f, TopAbs_WIRE)
+            while we.More():
+                w = TopoDS.Wire(we.Current())
+                e1, e2 = TopoDS_Edge(), TopoDS_Edge()
+                if BRepCheck_Wire(w).SelfIntersect(f, e1, e2, False) != BRepCheck_Status.BRepCheck_NoError:
+                    for e in (e1, e2):
+                        if not e.IsNull():
+                            spots.append(BRep_Tool.Pnt_s(TopExp.FirstVertex_s(e)))
+                            spots.append(BRep_Tool.Pnt_s(TopExp.LastVertex_s(e)))
+                we.Next()
+            if not spots:
+                spots = _bad_inner_wire_points(f)
+            if spots:
+                for p in spots:
+                    for f0 in faces_at(p):
+                        if not kept_faces.Contains(f0):
+                            kept_faces.Add(f0)
+                            ee = TopExp_Explorer(f0, TopAbs_EDGE)
+                            while ee.More():
+                                keep.append(ee.Current())
+                                ee.Next()
+            else:
+                whole.append(f)
+        if whole:
+            # Fehler ohne Ortsangabe: ganze Fläche schützen
+            bad_map = ShapeMap()
+            for f in whole:
+                bad_map.Add(f)
+            hist = unify.History()
+            ex = TopExp_Explorer(shape, TopAbs_FACE)
+            while ex.More():
+                f0 = ex.Current()
+                for f1 in hist.Modified(f0):
+                    if bad_map.Contains(f1) and not kept_faces.Contains(f0):
+                        kept_faces.Add(f0)
+                        ee = TopExp_Explorer(f0, TopAbs_EDGE)
+                        while ee.More():
+                            keep.append(ee.Current())
+                            ee.Next()
+                        break
+                ex.Next()
+        if len(keep) == n_keep:
+            return result
+        unify = run(keep)
+    return unify.Shape()
+
+
+def _fix_merged_tolerances(shape) -> None:
+    """Nach dem Zusammenfassen ebener Bereiche (UnifySameDomain) liegen die
+    Kanten zusammengefasster Flaechen nicht mehr exakt in der neuen Ebene
+    (Abweichung bis zur Zusammenfass-Toleranz). Ohne angepasste Toleranzen
+    meldet die strenge Pruefung diese Flaechen als fehlerhaft - beim
+    Schreiben/Neueinlesen der STEP-Datei werden sie sonst erst dort
+    korrigiert. Hier: Parameterkurven fuer Kanten auf zusammengefassten
+    Ebenen erzeugen, SameParameter herstellen und Toleranzen anpassen."""
+    ex = TopExp_Explorer(shape, TopAbs_FACE)
+    while ex.More():
+        face = TopoDS.Face(ex.Current())
+        ee = TopExp_Explorer(face, TopAbs_EDGE)
+        edges = []
+        while ee.More():
+            edges.append(TopoDS.Edge(ee.Current()))
+            ee.Next()
+        if len(edges) > 3:  # Einzeldreiecke sind exakt eben
+            for e in edges:
+                BRepLib.BuildPCurveForEdgeOnPlane_s(e, face)
+        ex.Next()
+    BRepLib.SameParameter_s(shape, 1e-7, True)
+    BRepLib.UpdateTolerances_s(shape, True)
+
+
 def _count_faces(shape) -> int:
     exp = TopExp_Explorer(shape, TopAbs_FACE)
     n = 0
@@ -1066,6 +1408,33 @@ def _build_solid_shared_topology(mesh: "trimesh.Trimesh", progress_cb=None, pct_
         pct_lo, pct_hi = pct_range
         report_every = max(1, n // 40)  # ca. 40 Zwischenmeldungen ueber die ganze Schleife
 
+        # Beschleunigt (STL-Ausrichter): Kantenrichtung je Facette vorab
+        # vektorisiert bestimmen, umgedrehte Kanten nur einmal erzeugen und
+        # die Ebene jeder Facette direkt aus Normale/Eckpunkt vorgeben
+        # (statt sie von OCCT aus der Kantenschleife suchen zu lassen).
+        # Ergebnis identisch, ca. 2x schneller.
+        Fa = np.asarray(F)
+        eu_f = edges_unique[faces_unique_edges]           # (n,3,2)
+        nxt = np.roll(Fa, -1, axis=1)
+        fwd = (eu_f[:, :, 0] == Fa) & (eu_f[:, :, 1] == nxt)
+        bwd = (eu_f[:, :, 0] == nxt) & (eu_f[:, :, 1] == Fa)
+        if not np.all(fwd | bwd):
+            return None, False, None
+        rev_edges = [TopoDS.Edge(e.Reversed()) for e in edges]
+        # Normalen selbst exakt (float64) aus den Eckpunkten berechnen – die
+        # in der STL gespeicherten Normalen (float32) waeren zu ungenau und
+        # die Ebene laege dann nicht exakt auf allen drei Eckpunkten.
+        Vd = np.asarray(V, dtype=np.float64)
+        cr = np.cross(Vd[Fa[:, 1]] - Vd[Fa[:, 0]], Vd[Fa[:, 2]] - Vd[Fa[:, 0]])
+        cl = np.linalg.norm(cr, axis=1)
+        normals = cr / np.where(cl > 0, cl, 1.0)[:, None]
+        nlen = np.where(cl > 1e-30, 1.0, 0.0)
+        FEl = np.asarray(faces_unique_edges).tolist()
+        fwdl = fwd.tolist()
+        nl = normals.tolist()
+        okn = (nlen > 0.5).tolist()
+        p0 = np.asarray(V)[Fa[:, 0]].tolist()
+
         faces_built = []
         for fi in range(n):
             if fi % guard_every == 0:
@@ -1074,25 +1443,20 @@ def _build_solid_shared_topology(mesh: "trimesh.Trimesh", progress_cb=None, pct_
                 frac = fi / n
                 pct = int(pct_lo + (pct_hi - pct_lo) * frac)
                 progress_cb(pct, f"Baue Volumenkoerper: Facette {fi:,} von {n:,} ...")
-
-            tri = F[fi]
-            eidx = faces_unique_edges[fi]
-            wm = BRepBuilderAPI_MakeWire()
-            ok = True
-            for k in range(3):
-                a, b = int(tri[k]), int(tri[(k + 1) % 3])
-                e = edges[eidx[k]]
-                ea, eb = edges_unique[eidx[k]]
-                if (ea, eb) == (a, b):
-                    wm.Add(e)
-                elif (ea, eb) == (b, a):
-                    wm.Add(TopoDS.Edge(e.Reversed()))
-                else:
-                    ok = False
-                    break
-            if not ok or not wm.IsDone():
+            e0, e1, e2 = FEl[fi]
+            f0, f1, f2 = fwdl[fi]
+            wm = BRepBuilderAPI_MakeWire(edges[e0] if f0 else rev_edges[e0],
+                                         edges[e1] if f1 else rev_edges[e1],
+                                         edges[e2] if f2 else rev_edges[e2])
+            if not wm.IsDone():
                 return None, False, None
-            face_maker = BRepBuilderAPI_MakeFace(wm.Wire(), True)
+            if okn[fi]:
+                nx_, ny_, nz_ = nl[fi]
+                px_, py_, pz_ = p0[fi]
+                face_maker = BRepBuilderAPI_MakeFace(
+                    gp_Pln(gp_Pnt(px_, py_, pz_), gp_Dir(nx_, ny_, nz_)), wm.Wire(), True)
+            else:
+                face_maker = BRepBuilderAPI_MakeFace(wm.Wire(), True)
             if not face_maker.IsDone():
                 return None, False, None
             faces_built.append(face_maker.Face())
@@ -1116,8 +1480,12 @@ def _build_solid_shared_topology(mesh: "trimesh.Trimesh", progress_cb=None, pct_
         # kuerzere Pruefzeit. (Der eingebaute Parallel-Modus von OCCT
         # brachte in eigenen Tests keine Beschleunigung - teils sogar
         # eine leichte Verlangsamung - und wird deshalb nicht genutzt.)
-        analyzer = BRepCheck_Analyzer(solid, False)
-        if not analyzer.IsValid():
+        # Beschleunigt (STL-Ausrichter): nur Huelle geschlossen + Orientierung
+        # pruefen (Sekundenbruchteil statt mehrerer Sekunden). Die volle,
+        # strenge Pruefung des fertigen Koerpers folgt ohnehin am Ende.
+        shell_check = BRepCheck_Shell(shell)
+        if (shell_check.Closed(False) != BRepCheck_Status.BRepCheck_NoError
+                or shell_check.Orientation(False) != BRepCheck_Status.BRepCheck_NoError):
             return None, False, None
 
         props = GProp_GProps()
@@ -1204,7 +1572,7 @@ def _build_body_shape(mesh: "trimesh.Trimesh", settings: ConversionSettings, tol
                     maker = BRepBuilderAPI_MakeSolid(shells[0])
                     if maker.IsDone():
                         solid = maker.Solid()
-                        if BRepCheck_Analyzer(solid).IsValid():
+                        if BRepCheck_Analyzer(solid, True, True).IsValid():
                             base_shape = solid
                             is_solid = True
                 except Exception:
@@ -1236,11 +1604,7 @@ def _build_body_shape(mesh: "trimesh.Trimesh", settings: ConversionSettings, tol
             detected_shapes = []
 
     if settings.merge_planar:
-        unify = ShapeUpgrade_UnifySameDomain(result_shape, True, True, True)
-        unify.SetLinearTolerance(tol)
-        unify.SetAngularTolerance(1e-3)
-        unify.Build()
-        result_shape = unify.Shape()
+        result_shape = _unify_safe(result_shape, tol)
 
     return result_shape, is_solid, detected_shapes, False
 
@@ -1449,7 +1813,7 @@ def convert_stl_to_step(
                         maker = BRepBuilderAPI_MakeSolid(shells[0])
                         if maker.IsDone():
                             solid = maker.Solid()
-                            if BRepCheck_Analyzer(solid).IsValid():
+                            if BRepCheck_Analyzer(solid, True, True).IsValid():
                                 base_shape = solid
                                 is_solid = True
                     except Exception:
@@ -1486,11 +1850,15 @@ def convert_stl_to_step(
 
             if settings.merge_planar:
                 report(78, "Fasse ebene Bereiche zu grossen Flaechen zusammen (Flaechenrueckfuehrung) ...")
-                unify = ShapeUpgrade_UnifySameDomain(result_shape, True, True, True)
-                unify.SetLinearTolerance(tol)
-                unify.SetAngularTolerance(1e-3)
-                unify.Build()
-                result_shape = unify.Shape()
+                result_shape = _unify_safe(result_shape, tol)
+
+        # Toleranzen an die zusammengefassten Flaechen anpassen (sonst meldet
+        # die strenge Pruefung bei leicht unebenen Zusammenfassungen Fehler,
+        # die erst beim Schreiben/Neueinlesen der STEP-Datei behoben wuerden).
+        try:
+            _fix_merged_tolerances(result_shape)
+        except Exception:
+            traceback.print_exc()
 
         faces_after = _count_faces(result_shape)
 
@@ -1501,14 +1869,33 @@ def convert_stl_to_step(
             BRepGProp.VolumeProperties_s(result_shape, props)
             volume = props.Mass()
 
+        if is_solid:
+            # Abschliessende Pruefung (beschleunigt): den fertigen Koerper im
+            # Speicher mit der vollen, strengen Pruefung kontrollieren
+            # (Parallel-Modus). Das erneute Einlesen der geschriebenen Datei
+            # kostete bei grossen Netzen mehr als die Haelfte der Gesamtzeit
+            # und ist nur noch als Option ("gruendliche Nachpruefung") aktiv.
+            report(90, "Pruefe fertigen Volumenkoerper ...")
+            if not BRepCheck_Analyzer(result_shape, True, True).IsValid():
+                raise ConversionError(
+                    "Der erzeugte Volumenkoerper hat die abschliessende Pruefung nicht "
+                    "bestanden (das Ergebnis waere fehlerhaft, z. B. mit einem Loch). "
+                    "Bitte die Einstellungen (z. B. Scan-Glättung deaktivieren) aendern "
+                    "und erneut versuchen."
+                )
+
         report(92, "Schreibe STEP-Datei ...")
-        writer = STEPControl_Writer()
+        writer = STEPControl_Writer()  # initialisiert erst die STEP-Parameter
+        try:
+            Interface_Static.SetIVal_s("write.surfacecurve.mode", 0 if settings.compact_step else 1)
+        except Exception:
+            pass
         writer.Transfer(result_shape, STEPControl_AsIs)
         status = writer.Write(output_path)
         if status != IFSelect_RetDone:
             raise ConversionError("STEP-Datei konnte nicht geschrieben werden.")
 
-        if is_solid:
+        if is_solid and settings.thorough_verify:
             # Letzte, unabhaengige Absicherung vor der Auslieferung: die
             # gerade geschriebene Datei ueber einen komplett separaten
             # Lese-Pfad erneut einlesen und mit der vollen, strengen
@@ -1522,7 +1909,7 @@ def convert_stl_to_step(
                 if verify_reader.ReadFile(output_path) == IFSelect_RetDone:
                     verify_reader.TransferRoots()
                     verify_shape = verify_reader.OneShape()
-                    if not BRepCheck_Analyzer(verify_shape).IsValid():
+                    if not BRepCheck_Analyzer(verify_shape, True, True).IsValid():
                         raise ConversionError(
                             "Die erzeugte STEP-Datei hat die abschliessende, unabhaengige "
                             "Pruefung nicht bestanden (das Ergebnis waere fehlerhaft, z. B. "

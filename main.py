@@ -529,17 +529,102 @@ class MainWindow(QMainWindow):
         l.addWidget(self.btn_reset_all)
         side.addWidget(c)
 
-        # Karte: STEP / Vereinfachen (optional) --------------------------
-        c, l = card("Optional: STEP & Vereinfachen", "karte_step")
-        hint = QLabel("Die Ausrichtung („Speichern unter …“) bleibt immer verlustfrei. "
-                      "Diese Funktionen erzeugen zusätzlich eine STEP-Datei bzw. eine "
-                      "vereinfachte STL – jeweils in der aktuellen Ausrichtung.")
+        # Karte: Scan -> STEP (optional) ----------------------------------
+        c, l = card("Scan → STEP", "karte_step")
+        hint = QLabel("Wandelt 3D-Scans (STL) in STEP um – in der aktuellen Ausrichtung. "
+                      "Die Ausrichtung selbst („Speichern unter …“) bleibt immer verlustfrei.")
         hint.setObjectName("hint")
         hint.setWordWrap(True)
         l.addWidget(hint)
         g = QGridLayout()
         g.setHorizontalSpacing(8)
         g.setVerticalSpacing(6)
+        lab = QLabel("Fragmente")
+        lab.setObjectName("muted")
+        self.cmb_frag = QComboBox()
+        self.cmb_frag.addItem("Nur größter Körper", "largest")
+        self.cmb_frag.addItem("Teile < 5 % entfernen", "small")
+        self.cmb_frag.addItem("Alle Körper behalten", "all")
+        self.cmb_frag.setToolTip("Scans enthalten oft Hunderte lose Teilchen (Staub, Reflexionen,\n"
+                                 "Tischreste). Diese werden sonst alle als eigene Körper umgewandelt.")
+        g.addWidget(lab, 0, 0)
+        g.addWidget(self.cmb_frag, 0, 1)
+        lab = QLabel("Detailstufe")
+        lab.setObjectName("muted")
+        self.cmb_faces = QComboBox()
+        for txt, val in (("25.000 Dreiecke", 25_000), ("50.000 Dreiecke", 50_000),
+                         ("100.000 Dreiecke", 100_000), ("200.000 Dreiecke", 200_000),
+                         ("500.000 Dreiecke", 500_000), ("Original", 0)):
+            self.cmb_faces.addItem(txt, val)
+        self.cmb_faces.setCurrentIndex(2)
+        self.cmb_faces.setToolTip("Höchstzahl Dreiecke für die STEP-Datei. Ebene Bereiche werden ohnehin\n"
+                                  "zu einer Fläche zusammengefasst – mehr Detail kostet vor allem Zeit.")
+        g.addWidget(lab, 1, 0)
+        g.addWidget(self.cmb_faces, 1, 1)
+        lab = QLabel("Scan-Toleranz")
+        lab.setObjectName("muted")
+        self.spn_tol = QDoubleSpinBox()
+        self.spn_tol.setRange(0.0, 10.0)
+        self.spn_tol.setDecimals(3)
+        self.spn_tol.setSingleStep(0.01)
+        self.spn_tol.setSpecialValueText("automatisch")
+        self.spn_tol.setSuffix(" mm")
+        self.spn_tol.setToolTip("Wie weit Scan-Punkte (Rauschen) von einer Ebene/Rundung abweichen dürfen,\n"
+                                "um noch dazuzugehören. „automatisch“ schätzt das Rauschen aus dem Scan.")
+        g.addWidget(lab, 2, 0)
+        g.addWidget(self.spn_tol, 2, 1)
+        lab = QLabel("Glättung")
+        lab.setObjectName("muted")
+        self.spn_smooth = QSpinBox()
+        self.spn_smooth.setRange(0, 10)
+        self.spn_smooth.setSuffix(" ×")
+        self.spn_smooth.setToolTip("Taubin-Glättung (Rauschen entfernen, volumenerhaltend), 0 = aus")
+        g.addWidget(lab, 3, 0)
+        g.addWidget(self.spn_smooth, 3, 1)
+        l.addLayout(g)
+        self.chk_repair = QCheckBox("Löcher schließen && Netz reparieren")
+        self.chk_flat = QCheckBox("Ebene Flächen begradigen")
+        self.chk_flat.setToolTip("Erkennt im Rahmen der Scan-Toleranz ebene Bereiche und legt sie exakt in\n"
+                                 "eine Ebene – im STEP wird daraus je EINE ebene Fläche mit scharfen Kanten.")
+        self.chk_cyl = QCheckBox("Bohrungen, Zapfen && Rundungen einpassen")
+        self.chk_cyl.setToolTip("Erkennt zylindrische Bereiche und legt die Punkte exakt auf den\n"
+                                "ausgeglichenen Zylinder (genauer Durchmesser, glatte Rundung).")
+        for cb in (self.chk_repair, self.chk_flat, self.chk_cyl):
+            cb.setChecked(True)
+            l.addWidget(cb)
+        l2 = section(l, "STEP-Optionen", "sek_step_opt")
+        self.chk_merge = QCheckBox("Ebene Flächen zusammenführen")
+        self.chk_detect = QCheckBox("Zylinder/Kugeln ersetzen (nur CAD-STL)")
+        self.chk_nurbs = QCheckBox("Scan-Oberfläche glätten (NURBS, langsam)")
+        self.chk_compact = QCheckBox("Kompakt schreiben (halbe Größe)")
+        self.chk_compact.setToolTip("Schreibt die STEP-Datei ohne zusätzliche Parameterkurven (P-Kurven).\n"
+                                    "Gängige CAD-Programme berechnen diese beim Einlesen selbst.\n"
+                                    "Ausschalten, falls ein Programm die Datei nicht korrekt öffnet.")
+        self.chk_verify = QCheckBox("Gründliche Nachprüfung (langsam)")
+        self.chk_verify.setToolTip("Liest die fertige STEP-Datei zusätzlich neu ein und prüft sie.\n"
+                                   "Der fertige Körper wird immer geprüft – diese Option kostet\n"
+                                   "bei großen Netzen ein Vielfaches der Umwandlungszeit.")
+        self.chk_scan = QCheckBox("Scan-Aufbereitung verwenden")
+        self.chk_scan.setChecked(True)
+        self.chk_scan.setToolTip("Für Scans einschalten. Für saubere CAD-Exporte (STL aus einem\n"
+                                 "CAD-Programm) abschalten – dann wird direkt umgewandelt.")
+        self.chk_detect.setToolTip("Ersetzt bei sauberen CAD-STL (unter 30.000 Dreiecken) volle\n"
+                                   "Zylinder/Kugeln durch echte STEP-Flächen.")
+        self.chk_merge.setChecked(True)
+        self.chk_detect.setChecked(True)
+        for cb in (self.chk_scan, self.chk_merge, self.chk_detect, self.chk_nurbs, self.chk_compact,
+                   self.chk_verify):
+            l2.addWidget(cb)
+        self.btn_step = QPushButton("Als STEP (.stp) speichern …")
+        self.btn_step.setObjectName("teal")
+        self.btn_scanstl = QPushButton("Aufbereiteten Scan als STL speichern …")
+        self.btn_scanstl.setToolTip("Speichert das Ergebnis der Scan-Aufbereitung als STL\n"
+                                    "(z. B. zur Kontrolle oder für den 3D-Druck).")
+        l.addWidget(self.btn_step)
+        l.addWidget(self.btn_scanstl)
+        l3 = section(l, "Nur vereinfachen (STL)", "sek_vereinfachen")
+        g = QGridLayout()
+        g.setHorizontalSpacing(8)
         lab = QLabel("Vereinfachung")
         lab.setObjectName("muted")
         self.sld_dec = QSlider(Qt.Horizontal)
@@ -553,27 +638,9 @@ class MainWindow(QMainWindow):
         g.addWidget(lab, 0, 0)
         g.addWidget(self.sld_dec, 0, 1)
         g.addWidget(self.lbl_dec, 0, 2)
-        lab = QLabel("Glättung")
-        lab.setObjectName("muted")
-        self.spn_smooth = QSpinBox()
-        self.spn_smooth.setRange(0, 10)
-        self.spn_smooth.setSuffix(" ×")
-        self.spn_smooth.setToolTip("Taubin-Glättung (Rauschen entfernen), 0 = aus")
-        g.addWidget(lab, 1, 0)
-        g.addWidget(self.spn_smooth, 1, 1, 1, 2)
-        l.addLayout(g)
-        self.chk_merge = QCheckBox("STEP: ebene Flächen zusammenführen")
-        self.chk_detect = QCheckBox("STEP: Zylinder/Kugeln ersetzen")
-        self.chk_nurbs = QCheckBox("STEP: Scan-Oberfläche glätten (NURBS)")
-        self.chk_merge.setChecked(True)
-        self.chk_detect.setChecked(True)
-        for cb in (self.chk_merge, self.chk_detect, self.chk_nurbs):
-            l.addWidget(cb)
-        self.btn_step = QPushButton("Als STEP (.stp) speichern …")
-        self.btn_step.setObjectName("teal")
+        l3.addLayout(g)
         self.btn_simplify = QPushButton("Vereinfacht als STL speichern …")
-        l.addWidget(self.btn_step)
-        l.addWidget(self.btn_simplify)
+        l3.addWidget(self.btn_simplify)
         side.addWidget(c)
 
         # Karte: Ansicht --------------------------------------------------
@@ -600,6 +667,13 @@ class MainWindow(QMainWindow):
             l.addWidget(cb)
         side.addWidget(c)
         side.addStretch(1)
+
+        # Seitenleiste darf nicht breiter werden als vorgesehen
+        for cmb in side_w.findChildren(QComboBox):
+            cmb.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            cmb.setMinimumContentsLength(8)
+        for chk in side_w.findChildren(QCheckBox):
+            chk.setMinimumWidth(0)
 
         # Statusleiste --------------------------------------------------
         status = QWidget()
@@ -648,6 +722,7 @@ class MainWindow(QMainWindow):
         self.btn_cancel.clicked.connect(self.cancel_worker)
         self.btn_step.clicked.connect(self.step_dialog)
         self.btn_simplify.clicked.connect(self.simplify_dialog)
+        self.btn_scanstl.clicked.connect(self.scanstl_dialog)
         self.cmb_pivot.currentIndexChanged.connect(self.on_pivot)
         self.view.rotationChanged.connect(self.on_rotation_changed)
         self.view.interactionFinished.connect(self.update_dims)
@@ -664,7 +739,7 @@ class MainWindow(QMainWindow):
         busy = self.worker is not None
         lay = self.view.lay_mode
         for w in (self.btn_save, self.btn_reset_all, self.btn_step, self.btn_simplify,
-                  self.btn_lay, self.btn_center, self.cmb_target, self.cmb_origin):
+                  self.btn_lay, self.btn_center, self.cmb_target, self.cmb_origin, self.btn_scanstl):
             w.setEnabled(has_file and not busy)
         for w in (self.btn_bake, self.btn_reset_pending, self.cmb_pivot, self.spn_flat, *self.spins,
                   *self.findChildren(QPushButton, "small")):
@@ -1060,16 +1135,25 @@ class MainWindow(QMainWindow):
                     merge_planar=self.chk_merge.isChecked(),
                     detect_curved_shapes=self.chk_detect.isChecked(),
                     smooth_scan_surfaces=self.chk_nurbs.isChecked(),
+                    compact_step=self.chk_compact.isChecked(),
+                    thorough_verify=self.chk_verify.isChecked(),
                     worker_count=0)
 
-    def _start_job(self, target, dst, decimate, title):
+    def _scan_settings(self):
+        return dict(fragments=self.cmb_frag.currentData(), max_faces=int(self.cmb_faces.currentData()),
+                    repair=self.chk_repair.isChecked(), flatten=self.chk_flat.isChecked(),
+                    cylinders=self.chk_cyl.isChecked(), tolerance=float(self.spn_tol.value()))
+
+    def _start_job(self, target, dst, decimate, title, scan=None):
         self._workdir = tempfile.mkdtemp(prefix="stl_ausrichter_")
         self._job_dst = dst
         R, t = self.view.R_total.copy(), self.view.t_total.copy()
         self._t0 = time.time()
         self.busy(True, title)
-        self.worker = ProcessRunner(target, self.info.path, dst, R, t,
-                                    self._conv_settings(decimate), self._workdir)
+        settings = self._conv_settings(decimate)
+        if scan is not None:
+            settings["scan"] = scan
+        self.worker = ProcessRunner(target, self.info.path, dst, R, t, settings, self._workdir)
         self.worker.progress.connect(self.on_progress)
         self.set_enabled(False)
         return self.worker
@@ -1094,11 +1178,46 @@ class MainWindow(QMainWindow):
             return
         if not p.lower().endswith((".stp", ".step")):
             p += ".stp"
-        dec = self.sld_dec.value()
-        w = self._start_job(jobs.step_job, p, dec, "Wandle in STEP um …")
+        if self.chk_scan.isChecked():
+            w = self._start_job(jobs.step_job, p, 100, "Bereite Scan auf und wandle in STEP um …",
+                                scan=self._scan_settings())
+        else:
+            w = self._start_job(jobs.step_job, p, self.sld_dec.value(), "Wandle in STEP um …")
         w.done.connect(self.on_step_done)
         w.failed.connect(lambda m: self.on_job_failed(m, "STEP-Umwandlung"))
         w.start()
+
+    def scanstl_dialog(self):
+        if not self.info or self.worker or not self.ask_pending():
+            return
+        base = os.path.splitext(self.info.path)[0]
+        p, _ = QFileDialog.getSaveFileName(self, "Aufbereiteten Scan speichern", base + "_aufbereitet.stl",
+                                           "STL-Dateien (*.stl)")
+        if not p:
+            return
+        if not p.lower().endswith(".stl"):
+            p += ".stl"
+        if os.path.normcase(os.path.abspath(p)) == os.path.normcase(os.path.abspath(self.info.path)):
+            QMessageBox.warning(self, APP_NAME, "Die Originaldatei kann hier nicht überschrieben werden.")
+            return
+        w = self._start_job(jobs.scan_job, p, 100, "Bereite Scan auf …", scan=self._scan_settings())
+        w.done.connect(self.on_scanstl_done)
+        w.failed.connect(lambda m: self.on_job_failed(m, "Scan-Aufbereitung"))
+        w.start()
+
+    def on_scanstl_done(self, d):
+        self._finish_worker()
+        self._job_cleanup(False)
+        self.set_enabled(True)
+        self.lbl_status.setText("Aufbereiteter Scan gespeichert: " + d["path"])
+        r = QMessageBox.question(
+            self, APP_NAME,
+            f"Aufbereiteter Scan gespeichert in {time.time() - self._t0:.0f} s:\n{d['path']}\n\n"
+            + scan_report(d["scan"]) + "\n\nAufbereitete Datei jetzt öffnen?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if r == QMessageBox.Yes:
+            self.view.reset_all()
+            self.load(d["path"])
 
     def simplify_dialog(self):
         if not self.info or self.worker or not self.ask_pending():
@@ -1135,6 +1254,8 @@ class MainWindow(QMainWindow):
         rep = [s for s in d.get("shapes", []) if s[2]]
         if rep:
             txt += f"\nErsetzte Zylinder/Kugeln: {len(rep)}"
+        if d.get("scan"):
+            txt += "\n\n" + scan_report(d["scan"])
         self.lbl_status.setText("STEP gespeichert: " + d["path"])
         QMessageBox.information(self, APP_NAME, txt)
 
@@ -1198,6 +1319,27 @@ class MainWindow(QMainWindow):
                 e.ignore()
                 return
         e.accept()
+
+
+def scan_report(st):
+    """Kurzbericht der Scan-Aufbereitung."""
+    if not st:
+        return ""
+    lines = ["Scan-Aufbereitung:"]
+    if st.get("bodies_in", 1) > 1:
+        lines.append(f"• {fmt_int(st['bodies_in'])} Körper im Scan, {fmt_int(st.get('bodies_removed', 0))} "
+                     f"lose Fragmente entfernt")
+    lines.append(f"• Dreiecke: {fmt_int(st.get('faces_in', 0))} → {fmt_int(st.get('faces_out', 0))}")
+    if st.get("holes_closed"):
+        lines.append("• Löcher geschlossen, Netz repariert")
+    if "planes" in st:
+        lines.append(f"• {st['planes']} ebene Flächen begradigt "
+                     f"({int(round(100 * st.get('plane_area_share', 0)))} % der Oberfläche)")
+    if st.get("cylinders"):
+        lines.append("• Rundungen eingepasst, Radien: " + ", ".join(fmt_num(r, 3) for r in st["cylinders"]))
+    lines.append(f"• Scan-Toleranz: {fmt_num(st.get('tolerance', 0), 3)}")
+    lines.append(f"• Wasserdicht: {'ja' if st.get('watertight') else 'nein'}")
+    return "\n".join(lines)
 
 
 def _free_space(path):

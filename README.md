@@ -1,4 +1,4 @@
-# STL-Ausrichter-MK1 · v1.3.0
+# STL-Ausrichter-MK1 · v1.5.0
 
 STL-Dateien öffnen, frei im Raum drehen, die X/Y/Z-Achsen und -Ebenen gerade zur
 angezeigten Lage ausrichten und die Datei **strukturgleich** wieder speichern –
@@ -100,25 +100,42 @@ wie gewohnt mit „Speichern unter …“.
 * Es wird zuerst in `<Ziel>.teil` geschrieben und erst am Ende umbenannt – bei Abbruch oder
   Fehler bleibt die Zieldatei unangetastet. Vor dem Speichern wird der freie Speicherplatz geprüft.
 
-## Optional: STEP-Umwandlung und Vereinfachen
+## Scan → STEP
 
-Beide Funktionen sind **nur Zusatzoptionen** und verwenden die aktuelle Ausrichtung.
-Die Originaldatei wird dabei nicht verändert.
+![Scan → STEP](docs/screenshot_scan.png)
 
-* **Als STEP speichern** – Flächenrückführung aus dem Projekt *STL-STEP-Konverter-MK1*
-  (`converter.py`): Dreiecksnetz → Volumenkörper, ebene Flächen zusammenführen, volle
-  Zylinder/Kugeln durch echte Flächen ersetzen, optional Scan-Oberflächen als NURBS glätten.
-  Reicht der Arbeitsspeicher nicht, vereinfacht der Konverter automatisch weiter.
-* **Vereinfacht als STL speichern** – reduziert die Anzahl der Dreiecke (Quadric-Dezimierung)
-  und glättet optional. Jeder Körper der Datei wird einzeln vereinfacht; würde ein Körper dabei
-  zerstört (verschwindet oder ändert seine Maße um mehr als 1 %), bleibt er unverändert.
-  Dieselbe Vorab-Vereinfachung wird auch vor der STEP-Umwandlung genutzt.
-* Einstellungen: *Vereinfachung* (Ziel-Dreiecke in %; bei STEP 100 % = keine Vorab-Vereinfachung),
-  *Glättung* (0–10 Durchgänge), STEP-Optionen.
-* Die Aufträge laufen in einem eigenen Prozess: jederzeit abbrechbar, und selbst ein
-  Speicherengpass beendet nur den Auftrag, nicht das Programm.
-* Hinweis: Für STEP und Vereinfachen wird das Netz vollständig geladen – bei Dateien mit
-  mehreren GB braucht das entsprechend viel Arbeitsspeicher und Zeit.
+Das Programm ist auf **3D-Scans** ausgelegt. Vor der eigentlichen STEP-Umwandlung wird der Scan
+automatisch aufbereitet (Bereich „Scan → STEP“):
+
+1. **Fragmente entfernen** – Scans enthalten oft Hunderte lose Teilchen (Staub, Reflexionen,
+   Tischreste). Standard: nur der größte Körper bleibt (wahlweise Teile < 5 % entfernen oder alle
+   behalten). Vorher wurde jedes Teilchen als eigener Körper umgewandelt.
+2. **Detailstufe** – auf eine sinnvolle Dreieckszahl vereinfachen (Standard 100.000).
+3. **Löcher schließen & reparieren** – wasserdicht, ohne Selbstüberschneidungen (MeshFix).
+4. **Bohrungen, Zapfen & Rundungen einpassen** – zylindrische Bereiche werden erkannt und die
+   Punkte exakt auf den ausgeglichenen Zylinder gelegt: genaue Durchmesser, glatte Rundung.
+5. **Ebene Flächen begradigen** – im Rahmen der Scan-Toleranz ebene Bereiche werden exakt in eine
+   Ebene gelegt, Kanten zwischen zwei Ebenen exakt auf die Schnittkante. Im STEP wird daraus je
+   **eine** ebene Fläche mit scharfen Kanten statt Tausender verrauschter Dreiecke.
+6. **Scan-Toleranz** – automatisch aus dem Rauschen des Scans geschätzt oder fest in mm.
+
+Danach folgt die STEP-Umwandlung (Volumenkörper, ebene Flächen zusammenfassen). Ungültige
+Stellen, die bei verrauschten Daten beim Zusammenfassen entstehen können, werden automatisch
+erkannt und dort als Dreiecke belassen – das Ergebnis ist immer ein geprüfter Volumenkörper.
+
+Nach dem Speichern zeigt ein Bericht, was gemacht wurde (entfernte Fragmente, Anzahl Ebenen,
+erkannte Radien, Toleranz). Mit **„Aufbereiteten Scan als STL speichern …“** lässt sich das
+Ergebnis der Aufbereitung auch als STL speichern und prüfen.
+
+Für saubere CAD-Exporte (keine Scans) kann die Aufbereitung unter „STEP-Optionen“ abgeschaltet
+werden; dann werden volle Zylinder/Kugeln (bis 30.000 Dreiecke) durch echte STEP-Flächen ersetzt.
+
+Weitere STEP-Optionen: *kompakt schreiben* (ohne P-Kurven, ca. halbe Dateigröße),
+*gründliche Nachprüfung* (Datei neu einlesen – langsam), *Scan-Oberfläche glätten (NURBS)*.
+Unter „Nur vereinfachen (STL)“ gibt es weiterhin die reine Vereinfachung.
+
+Alle Aufträge laufen in einem eigenen Prozess (jederzeit abbrechbar) und verwenden die aktuelle
+Ausrichtung; die Originaldatei wird nicht verändert.
 
 ## Build
 
@@ -139,6 +156,11 @@ python main.py [datei.stl]
 
 ## Versionen
 
+* **1.5.0** – Scan-Aufbereitung für Scan → STEP: Fragmente entfernen, Detailstufe, Reparatur,
+  Ebenen begradigen, Bohrungen/Rundungen einpassen, Bericht; abgesichertes Zusammenfassen
+  ebener Flächen; aufbereiteten Scan als STL speichern.
+* **1.4.0** – STEP-Umwandlung ca. 2–2,5× schneller; Optionen „kompakt schreiben“ und
+  „gründliche Nachprüfung“.
 * **1.3.0** – Bereiche einklappbar (meist eingeklappt); Ursprung wird nach „Achsen ausrichten“
   automatisch in die Körpermitte gesetzt; STEP-Fehler „No module named 'networkx'“ behoben.
 * **1.2.1** – „Achsen ausrichten“ richtet die Achsen jetzt an der Ansicht aus (eine Achse exakt
