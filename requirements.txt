@@ -9,3 +9,4 @@ pyransac3d>=0.6
 fast-simplification>=0.1
 psutil>=5.9
 pymeshfix>=0.16
+networkx>=3.0          # von trimesh für Reparatur (fix_normals, fill_holes) benötigt

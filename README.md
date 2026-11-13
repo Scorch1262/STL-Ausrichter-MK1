@@ -1,4 +1,4 @@
-# STL-Ausrichter-MK1 · v1.2.1
+# STL-Ausrichter-MK1 · v1.3.0
 
 STL-Dateien öffnen, frei im Raum drehen, die X/Y/Z-Achsen und -Ebenen gerade zur
 angezeigten Lage ausrichten und die Datei **strukturgleich** wieder speichern –
@@ -39,6 +39,14 @@ zeigt danach **exakt zum Betrachter** (sie erscheint als Punkt); die beiden ande
 **exakt waagerecht bzw. senkrecht** zum Fensterrand. Die Ansicht springt dazu auf die passende
 Standardansicht (z. B. von vorne), ohne dass sich das Bild ändert.
 Zum Feinjustieren vorher: Strg + linke Maustaste dreht das Objekt um die Blickachse.
+
+Direkt danach werden die **Koordinaten automatisch umgesetzt**: Der Ursprung 0/0/0 wandert in die
+Mitte des Körpers (Einstellung „Ursprung danach“: Mitte der Begrenzungsbox, Volumenschwerpunkt
+oder nicht verschieben). Dasselbe gilt für „Auf Fläche legen“.
+
+**Oberfläche:** Die meisten Bereiche sind im Normalzustand eingeklappt (▸) und lassen sich per
+Klick auf die Überschrift öffnen (▾). Offen sind nur „Datei“ und „Ausrichten“. Welche Bereiche
+offen sind, merkt sich das Programm (in der Windows-Registrierung, keine Dateien neben der exe).
 
 **Drehpunkt**
 * *Objektmitte (Lage bleibt)* – das Objekt dreht um seine Mitte, seine Position im Raum bleibt erhalten.
@@ -131,6 +139,8 @@ python main.py [datei.stl]
 
 ## Versionen
 
+* **1.3.0** – Bereiche einklappbar (meist eingeklappt); Ursprung wird nach „Achsen ausrichten“
+  automatisch in die Körpermitte gesetzt; STEP-Fehler „No module named 'networkx'“ behoben.
 * **1.2.1** – „Achsen ausrichten“ richtet die Achsen jetzt an der Ansicht aus (eine Achse exakt
   zum Betrachter, die anderen parallel zum Fensterrand); Kamera mit Drehung um die Blickachse.
 * **1.2.0** – „Auf Fläche legen“ (wie Bambu Studio) für XY/XZ/YZ mit Folge-Ebene,

@@ -19,7 +19,7 @@ import tempfile
 import time
 
 import numpy as np
-from PySide6.QtCore import QThread, Qt, QTimer, Signal
+from PySide6.QtCore import QSettings, QThread, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QIcon, QKeySequence, QSurfaceFormat
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
                                QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow,
@@ -45,6 +45,12 @@ QWidget#side { background: #0b0f14; }
 QScrollArea { border: none; background: #0b0f14; }
 QFrame#card { background: #111821; border: 1px solid #1e2a37; border-radius: 10px; }
 QLabel#cardTitle { color: #7d8a99; font-size: 8pt; font-weight: 600; letter-spacing: 2px; }
+QPushButton#cardHeader { background: transparent; border: none; text-align: left; padding: 2px 0;
+    color: #7d8a99; font-size: 8pt; font-weight: 600; letter-spacing: 2px; }
+QPushButton#cardHeader:hover { color: #2dd4bf; }
+QPushButton#subHeader { background: transparent; border: none; border-top: 1px solid #1e2a37;
+    text-align: left; padding: 6px 0 2px 0; color: #9aa7b5; font-size: 9pt; }
+QPushButton#subHeader:hover { color: #2dd4bf; }
 QLabel#muted { color: #7d8a99; }
 QLabel#value { font-family: Consolas, 'Cascadia Mono', monospace; color: #e6edf5; }
 QLabel#warn { color: #f5a524; font-weight: 600; }
@@ -206,16 +212,59 @@ def _kill_tree(p):
 
 
 # ------------------------------------------------------------------ UI-Helfer
-def card(title):
-    f = QFrame()
-    f.setObjectName("card")
-    lay = QVBoxLayout(f)
-    lay.setContentsMargins(12, 10, 12, 12)
-    lay.setSpacing(7)
-    t = QLabel(title.upper())
-    t.setObjectName("cardTitle")
-    lay.addWidget(t)
-    return f, lay
+class Collapsible(QFrame):
+    """Ein-/ausklappbarer Bereich. Der Zustand wird gemerkt (Windows-Registrierung,
+    keine Dateien neben der exe)."""
+
+    def __init__(self, title, key, expanded=False, is_card=True):
+        super().__init__()
+        self.setObjectName("card" if is_card else "sub")
+        t = title.upper() if is_card else title
+        self._title = t.replace("&", "&&")   # & sonst als Tastenkürzel gedeutet
+        self._key = "ui/" + key
+        outer = QVBoxLayout(self)
+        if is_card:
+            outer.setContentsMargins(12, 8, 12, 10)
+        else:
+            outer.setContentsMargins(0, 2, 0, 0)
+        outer.setSpacing(6)
+        self.header = QPushButton()
+        self.header.setObjectName("cardHeader" if is_card else "subHeader")
+        self.header.setCheckable(True)
+        self.header.setCursor(Qt.PointingHandCursor)
+        self.header.setFocusPolicy(Qt.NoFocus)
+        self.body = QWidget()
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(0, 0, 0, 0)
+        self.body_layout.setSpacing(7)
+        outer.addWidget(self.header)
+        outer.addWidget(self.body)
+        state = QSettings(APP_NAME, APP_NAME).value(self._key, expanded, type=bool)
+        self.header.setChecked(state)
+        self._apply(state)
+        self.header.toggled.connect(self._toggled)
+
+    def _apply(self, on):
+        self.body.setVisible(on)
+        self.header.setText(("▾  " if on else "▸  ") + self._title)
+
+    def _toggled(self, on):
+        self._apply(on)
+        QSettings(APP_NAME, APP_NAME).setValue(self._key, on)
+
+    def expand(self):
+        self.header.setChecked(True)
+
+
+def card(title, key, expanded=False):
+    f = Collapsible(title, key, expanded, True)
+    return f, f.body_layout
+
+
+def section(parent_layout, title, key, expanded=False):
+    f = Collapsible(title, key, expanded, False)
+    parent_layout.addWidget(f)
+    return f.body_layout
 
 
 def kv(grid, row, key, obj_name="value"):
@@ -301,7 +350,7 @@ class MainWindow(QMainWindow):
         body.addLayout(vwrap_outer, 1)
 
         # Karte: Datei ------------------------------------------------------
-        c, l = card("Datei")
+        c, l = card("Datei", "karte_datei", True)
         row = QHBoxLayout()
         self.btn_open = QPushButton("Öffnen …")
         self.btn_save = QPushButton("Speichern unter …")
@@ -309,6 +358,7 @@ class MainWindow(QMainWindow):
         row.addWidget(self.btn_open)
         row.addWidget(self.btn_save)
         l.addLayout(row)
+        l = section(l, "Datei-Infos & Anzeige-Detail", "sek_datei")
         g = QGridLayout()
         g.setHorizontalSpacing(10)
         g.setVerticalSpacing(3)
@@ -334,13 +384,16 @@ class MainWindow(QMainWindow):
         side.addWidget(c)
 
         # Karte: Drehung --------------------------------------------------
-        c, l = card("Drehung (ausstehend)")
+        c, l = card("Ausrichten", "karte_drehung", True)
+        self.card_rot = c
         hint = QLabel("Objekt mit der linken Maustaste so hindrehen, wie es liegen soll, dann "
                       "„Achsen ausrichten“: Eine Achse zeigt danach genau zum Betrachter, die "
                       "beiden anderen verlaufen parallel zum Fensterrand.")
         hint.setObjectName("muted")
         hint.setWordWrap(True)
         l.addWidget(hint)
+        l_main = l
+        l = section(l_main, "Winkel eingeben & Drehpunkt", "sek_winkel")
         g = QGridLayout()
         g.setHorizontalSpacing(5)
         g.setVerticalSpacing(5)
@@ -381,6 +434,20 @@ class MainWindow(QMainWindow):
         piv.addWidget(lab)
         piv.addWidget(self.cmb_pivot, 1)
         l.addLayout(piv)
+        l = l_main
+        orow = QHBoxLayout()
+        lab = QLabel("Ursprung danach")
+        lab.setObjectName("muted")
+        self.cmb_origin = QComboBox()
+        self.cmb_origin.addItem("Mitte des Körpers (Box)", "box")
+        self.cmb_origin.addItem("Volumenschwerpunkt", "centroid")
+        self.cmb_origin.addItem("nicht verschieben", "none")
+        self.cmb_origin.setToolTip("Wohin der Ursprung 0/0/0 nach „Achsen ausrichten“ und\n"
+                                   "„Auf Fläche legen“ automatisch gesetzt wird.\n"
+                                   "Wird exakt über ALLE Dreiecke der Datei berechnet.")
+        orow.addWidget(lab)
+        orow.addWidget(self.cmb_origin, 1)
+        l.addLayout(orow)
         self.btn_bake = QPushButton("ACHSEN AUSRICHTEN")
         self.btn_bake.setObjectName("primary")
         self.btn_bake.setToolTip("Richtet die Achsen an der aktuellen Ansicht aus: Das Objekt bleibt so\n"
@@ -394,7 +461,8 @@ class MainWindow(QMainWindow):
         side.addWidget(c)
 
         # Karte: Auf Fläche legen -------------------------------------------
-        c, l = card("Auf Fläche legen")
+        c, l = card("Auf Fläche legen", "karte_flaeche")
+        self.card_lay = c
         hint = QLabel("Zeigt die ebenen Flächen des Körpers (wie „Auf Fläche legen“ in "
                       "Bambu Studio). Angeklickte Fläche wird auf die gewählte Ebene gelegt.")
         hint.setObjectName("hint")
@@ -414,16 +482,6 @@ class MainWindow(QMainWindow):
             self.cmb_target.addItem(txt, d)
         g.addWidget(lab, 0, 0)
         g.addWidget(self.cmb_target, 0, 1)
-        lab = QLabel("Ursprung")
-        lab.setObjectName("muted")
-        self.cmb_origin = QComboBox()
-        self.cmb_origin.addItem("Mitte des Körpers (Box)", "box")
-        self.cmb_origin.addItem("Volumenschwerpunkt", "centroid")
-        self.cmb_origin.addItem("nicht verschieben", "none")
-        self.cmb_origin.setToolTip("Wohin der Ursprung 0/0/0 nach dem Legen gesetzt wird.\n"
-                                   "Wird exakt über ALLE Dreiecke der Datei berechnet.")
-        g.addWidget(lab, 1, 0)
-        g.addWidget(self.cmb_origin, 1, 1)
         lab = QLabel("Ebenheit")
         lab.setObjectName("muted")
         self.spn_flat = QDoubleSpinBox()
@@ -434,8 +492,8 @@ class MainWindow(QMainWindow):
         self.spn_flat.setSuffix(" °")
         self.spn_flat.setToolTip("Wie stark Teilflächen voneinander abweichen dürfen, um noch als\n"
                                  "eine ebene Fläche zu gelten (größer = toleranter, z. B. für Scans).")
-        g.addWidget(lab, 2, 0)
-        g.addWidget(self.spn_flat, 2, 1)
+        g.addWidget(lab, 1, 0)
+        g.addWidget(self.spn_flat, 1, 1)
         l.addLayout(g)
         self.chk_edge = QCheckBox("Längste Kante an Achse ausrichten")
         self.chk_edge.setChecked(True)
@@ -458,7 +516,7 @@ class MainWindow(QMainWindow):
         self.lay_lock = []
 
         # Karte: Gesamtänderung ------------------------------------------
-        c, l = card("Übernommene Änderung")
+        c, l = card("Übernommene Änderung", "karte_aenderung")
         g = QGridLayout()
         g.setHorizontalSpacing(10)
         g.setVerticalSpacing(3)
@@ -472,7 +530,7 @@ class MainWindow(QMainWindow):
         side.addWidget(c)
 
         # Karte: STEP / Vereinfachen (optional) --------------------------
-        c, l = card("Optional: STEP & Vereinfachen")
+        c, l = card("Optional: STEP & Vereinfachen", "karte_step")
         hint = QLabel("Die Ausrichtung („Speichern unter …“) bleibt immer verlustfrei. "
                       "Diese Funktionen erzeugen zusätzlich eine STEP-Datei bzw. eine "
                       "vereinfachte STL – jeweils in der aktuellen Ausrichtung.")
@@ -519,7 +577,7 @@ class MainWindow(QMainWindow):
         side.addWidget(c)
 
         # Karte: Ansicht --------------------------------------------------
-        c, l = card("Ansicht")
+        c, l = card("Ansicht", "karte_ansicht")
         g = QGridLayout()
         g.setSpacing(5)
         views = [("Iso", "iso"), ("Vorne", "vorne"), ("Oben", "oben"), ("Rechts", "rechts"),
@@ -576,7 +634,7 @@ class MainWindow(QMainWindow):
         m.addAction(QAction("Drehung verwerfen / Flächenmodus beenden", self, shortcut=QKeySequence("Esc"),
                             triggered=self.on_escape))
         m.addAction(QAction("Auf Fläche legen", self, shortcut=QKeySequence("F"),
-                            triggered=lambda: self.btn_lay.isEnabled() and self.btn_lay.click()))
+                            triggered=lambda: self.btn_lay.isEnabled() and (self.card_lay.expand(), self.btn_lay.click())))
         m.addAction(QAction("Ursprung in Körpermitte setzen", self, triggered=self.center_origin))
         m = self.menuBar().addMenu("&Hilfe")
         m.addAction(QAction("Über …", self, triggered=self.about))
@@ -754,8 +812,14 @@ class MainWindow(QMainWindow):
         self._unlock()
         rr, uu, bb = self.view.align_to_view()
         self.update_dims()
-        self.lbl_status.setText(f"Achsen an der Ansicht ausgerichtet: {bb} zeigt zum Betrachter, "
-                                f"{rr} nach rechts, {uu} nach oben. Mit „Speichern unter …“ sichern.")
+        self._align_msg = (f"Achsen an der Ansicht ausgerichtet: {bb} zeigt zum Betrachter, "
+                           f"{rr} nach rechts, {uu} nach oben.")
+        self.lbl_status.setText(self._align_msg + " Mit „Speichern unter …“ sichern.")
+        # Koordinaten automatisch umsetzen: Ursprung in die Körpermitte
+        if self.cmb_origin.currentData() != "none":
+            self.center_origin()
+        else:
+            self._align_msg = ""
 
     def reset_all(self):
         self.btn_lay.setChecked(False)
@@ -846,6 +910,7 @@ class MainWindow(QMainWindow):
             "  Nächste Fläche auf eine andere Ebene legen, um auch die übrigen Achsen festzulegen."
             if len(new_lock) == 1 else "  Alle drei Achsen sind festgelegt."))
         if self.cmb_origin.currentData() != "none":
+            self._align_msg = ""
             self.center_origin()
         else:
             self.lbl_status.setText("Fläche gelegt.")
@@ -890,8 +955,11 @@ class MainWindow(QMainWindow):
         self.on_rotation_changed()
         ext = b["max"] - b["min"]
         self.v_dims.setText(" × ".join(fmt_num(x, 2) for x in ext))
-        self.lbl_status.setText(f"Ursprung gesetzt ({note}). Exakte Maße: "
-                                + " × ".join(fmt_num(x, 3) for x in ext))
+        msg = (f"Ursprung gesetzt ({note}). Exakte Maße: " + " × ".join(fmt_num(x, 3) for x in ext))
+        if getattr(self, "_align_msg", ""):
+            msg = self._align_msg + " " + msg
+            self._align_msg = ""
+        self.lbl_status.setText(msg)
 
     def on_center_failed(self, msg):
         self._finish_worker()
