@@ -1,4 +1,4 @@
-# STL-Ausrichter-MK1 · v1.2.0
+# STL-Ausrichter-MK1 · v1.2.1
 
 STL-Dateien öffnen, frei im Raum drehen, die X/Y/Z-Achsen und -Ebenen gerade zur
 angezeigten Lage ausrichten und die Datei **strukturgleich** wieder speichern –
@@ -20,7 +20,7 @@ Das Programm ist **eine einzelne exe** – ohne daneben liegende Dateien oder Or
 | Ansicht verschieben | Mittlere Maustaste oder Umschalt + rechte Maustaste |
 | Zoom | Mausrad |
 | Genau drehen | Winkelfelder X/Y/Z oder Knöpfe −90 / −1 / +1 / +90 |
-| Lage übernehmen | **ACHSEN AUSRICHTEN** (Strg+Enter) |
+| Achsen an Ansicht ausrichten | **ACHSEN AUSRICHTEN** (Strg+Enter) |
 | Auf Fläche legen | **FLÄCHEN ANZEIGEN** (F) → Fläche anklicken · Esc beendet |
 | Ursprung in Körpermitte | „Ursprung jetzt in Körpermitte setzen“ |
 | Drehung verwerfen | Esc |
@@ -33,8 +33,12 @@ Angezeigt werden:
 * **Objekt-Ebenen XY / XZ / YZ** und **Objekt-Achsen X / Y / Z** (farbig, drehen mit dem Objekt)
 * **Welt-Referenz** (graues Gitter und Rahmen, fest)
 
-Nach „Achsen ausrichten“ liegen Objekt-Ebenen und Welt-Referenz deckungsgleich:
-die soeben angezeigte Lage ist jetzt die neue Grundlage des Objekts.
+**ACHSEN AUSRICHTEN** richtet die Achsen an der aktuellen Ansicht aus: Das Objekt bleibt auf dem
+Bildschirm genau so liegen, wie es angezeigt wird. Die Achse, die am ehesten zum Betrachter zeigt,
+zeigt danach **exakt zum Betrachter** (sie erscheint als Punkt); die beiden anderen verlaufen
+**exakt waagerecht bzw. senkrecht** zum Fensterrand. Die Ansicht springt dazu auf die passende
+Standardansicht (z. B. von vorne), ohne dass sich das Bild ändert.
+Zum Feinjustieren vorher: Strg + linke Maustaste dreht das Objekt um die Blickachse.
 
 **Drehpunkt**
 * *Objektmitte (Lage bleibt)* – das Objekt dreht um seine Mitte, seine Position im Raum bleibt erhalten.
@@ -127,6 +131,8 @@ python main.py [datei.stl]
 
 ## Versionen
 
+* **1.2.1** – „Achsen ausrichten“ richtet die Achsen jetzt an der Ansicht aus (eine Achse exakt
+  zum Betrachter, die anderen parallel zum Fensterrand); Kamera mit Drehung um die Blickachse.
 * **1.2.0** – „Auf Fläche legen“ (wie Bambu Studio) für XY/XZ/YZ mit Folge-Ebene,
   Kantenausrichtung und Ursprung in Körpermitte (Box oder Volumenschwerpunkt, exakt).
 * **1.1.0** – Eine einzelne exe; STEP-Umwandlung (aus STL-STEP-Konverter-MK1) und Vereinfachen

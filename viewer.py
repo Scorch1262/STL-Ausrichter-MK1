@@ -176,6 +176,7 @@ class GLView(QOpenGLWidget):
         self.pivot_center = True
         # Kamera --------------------------------------------------------
         self.az, self.el = -55.0, 25.0
+        self.roll = 0.0                  # Drehung der Kamera um die Blickachse
         self.dist = 3.0
         self.target = np.zeros(3)
         self.ortho = True
@@ -332,13 +333,60 @@ class GLView(QOpenGLWidget):
         back = np.array([math.cos(el) * math.cos(az), math.cos(el) * math.sin(az), math.sin(el)])
         up = np.array([-math.sin(el) * math.cos(az), -math.sin(el) * math.sin(az), math.cos(el)])
         right = np.cross(up, back)
+        if self.roll:
+            Rr = rot_axis(back, self.roll)
+            right, up = Rr @ right, Rr @ up
         return right, up, back
+
+    def set_camera_basis(self, right, up, back):
+        """Kamera exakt auf eine vorgegebene Blickrichtung/Oben-Richtung stellen."""
+        back = np.asarray(back, float)
+        up = np.asarray(up, float)
+        bz = max(-1.0, min(1.0, back[2]))
+        self.el = math.degrees(math.asin(bz))
+        if abs(bz) > 1 - 1e-12:
+            self.el = 90.0 if bz > 0 else -90.0
+            # Oben-Richtung bei Draufsicht/Untersicht über den Azimut einstellen
+            self.az = math.degrees(math.atan2(-up[1], -up[0]) if bz > 0 else math.atan2(up[1], up[0]))
+        else:
+            self.az = math.degrees(math.atan2(back[1], back[0]))
+        self.roll = 0.0
+        _, u0, b0 = self.cam_basis()
+        self.roll = math.degrees(math.atan2(np.dot(np.cross(u0, up), b0), np.dot(u0, up)))
+        self.update()
 
     def set_view(self, name):
         presets = {"iso": (-55, 25), "vorne": (-90, 0), "hinten": (90, 0), "rechts": (0, 0),
                    "links": (180, 0), "oben": (-90, 90), "unten": (-90, -90)}
         self.az, self.el = presets[name]
+        self.roll = 0.0
         self.update()
+
+    def align_to_view(self):
+        """Achsen an der aktuellen Ansicht ausrichten.
+
+        Das Objekt bleibt auf dem Bildschirm unverändert liegen. Seine Achsen
+        werden so neu gesetzt, dass die Achse, die am ehesten zum Betrachter
+        zeigt, danach EXAKT zum Betrachter zeigt und die beiden anderen exakt
+        waagerecht bzw. senkrecht zum Fensterrand verlaufen.
+        Gibt (Achse→rechts, Achse→oben, Achse→Betrachter) als Text zurück."""
+        r, u, b = self.cam_basis()
+        M = np.column_stack([r, u, b])        # Bildschirm-Achsen in Weltkoordinaten
+        P = nearest_signed_permutation(M)     # nächstliegende Welt-Achsen
+        Q = P @ M.T                           # dreht Bildschirm-Rahmen auf Achsen-Rahmen
+        p = self.pivot()
+        target_rel = self.target - p
+        self.R_view = Q @ self.R_view         # Objekt (inkl. ausstehender Drehung) mitdrehen
+        self.bake()
+        # Kamera um denselben Drehpunkt mitdrehen -> Bild bleibt identisch
+        self.set_camera_basis(P[:, 0], P[:, 1], P[:, 2])
+        self.target = p + Q @ target_rel
+        self.update()
+        names = []
+        for k in range(3):
+            i = int(np.argmax(np.abs(P[:, k])))
+            names.append(("+" if P[i, k] > 0 else "−") + "XYZ"[i])
+        return names
 
     def fit(self):
         self.target = self.current_center()
@@ -680,6 +728,22 @@ class GLView(QOpenGLWidget):
         p = _stl_from_mime(e.mimeData())
         if p:
             self.fileDropped.emit(p)
+
+
+def nearest_signed_permutation(M):
+    """Nächstliegende Achsen-Matrix (nur 0/±1, Determinante +1) zu einer Drehmatrix."""
+    A = np.abs(M).copy()
+    P = np.zeros((3, 3))
+    for _ in range(3):
+        i, j = np.unravel_index(np.argmax(A), A.shape)
+        P[i, j] = 1.0 if M[i, j] >= 0 else -1.0
+        A[i, :] = -1
+        A[:, j] = -1
+    if np.linalg.det(P) < 0:
+        # unsicherste Zuordnung umdrehen
+        k = int(np.argmin([abs(M[np.argmax(np.abs(P[:, c])), c]) for c in range(3)]))
+        P[:, k] *= -1
+    return P
 
 
 def _stl_from_mime(md):

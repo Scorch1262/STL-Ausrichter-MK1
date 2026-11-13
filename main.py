@@ -335,8 +335,9 @@ class MainWindow(QMainWindow):
 
         # Karte: Drehung --------------------------------------------------
         c, l = card("Drehung (ausstehend)")
-        hint = QLabel("Objekt mit der linken Maustaste drehen oder Winkel eingeben "
-                      "(Reihenfolge X → Y → Z, Weltachsen).")
+        hint = QLabel("Objekt mit der linken Maustaste so hindrehen, wie es liegen soll, dann "
+                      "„Achsen ausrichten“: Eine Achse zeigt danach genau zum Betrachter, die "
+                      "beiden anderen verlaufen parallel zum Fensterrand.")
         hint.setObjectName("muted")
         hint.setWordWrap(True)
         l.addWidget(hint)
@@ -382,8 +383,9 @@ class MainWindow(QMainWindow):
         l.addLayout(piv)
         self.btn_bake = QPushButton("ACHSEN AUSRICHTEN")
         self.btn_bake.setObjectName("primary")
-        self.btn_bake.setToolTip("Übernimmt die aktuell angezeigte Lage: Die X/Y/Z-Achsen und\n"
-                                 "-Ebenen des Objekts werden gerade zur jetzigen Darstellung gestellt.")
+        self.btn_bake.setToolTip("Richtet die Achsen an der aktuellen Ansicht aus: Das Objekt bleibt so\n"
+                                 "liegen, wie es angezeigt wird. Eine Achse zeigt danach exakt zum\n"
+                                 "Betrachter, die beiden anderen verlaufen parallel zum Fensterrand.")
         l.addWidget(self.btn_bake)
         self.lbl_pending = QLabel("")
         self.lbl_pending.setObjectName("warn")
@@ -746,14 +748,14 @@ class MainWindow(QMainWindow):
         self.v_dims.setText(" × ".join(fmt_num(x, 2) for x in d))
 
     def bake(self):
+        """ACHSEN AUSRICHTEN: Achsen an der aktuellen Ansicht ausrichten."""
         if not self.info:
             return
-        if self.has_pending():
-            self._unlock()
-        self.view.bake()
+        self._unlock()
+        rr, uu, bb = self.view.align_to_view()
         self.update_dims()
-        self.lbl_status.setText("Achsen ausgerichtet – Objektebenen stehen jetzt gerade. "
-                                "Mit „Speichern unter …“ sichern.")
+        self.lbl_status.setText(f"Achsen an der Ansicht ausgerichtet: {bb} zeigt zum Betrachter, "
+                                f"{rr} nach rechts, {uu} nach oben. Mit „Speichern unter …“ sichern.")
 
     def reset_all(self):
         self.btn_lay.setChecked(False)
@@ -921,7 +923,8 @@ class MainWindow(QMainWindow):
             if r == QMessageBox.Cancel:
                 return False
             if r == QMessageBox.Yes:
-                self.bake()
+                self.view.bake()
+                self.update_dims()
         return True
 
     def save_dialog(self):
