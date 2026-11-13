@@ -4,6 +4,18 @@ from __future__ import annotations
 
 import os
 import sys
+
+# In der fensterlosen exe gibt es keine Konsole (sys.stdout/stderr = None).
+# Bibliotheken, die etwas ausgeben (traceback.print_exc …), würden sonst abstürzen.
+if sys.stdout is None or sys.stderr is None:
+    _null = open(os.devnull, "w")
+    sys.stdout = sys.stdout or _null
+    sys.stderr = sys.stderr or _null
+
+import multiprocessing
+import queue as queue_module
+import shutil
+import tempfile
 import time
 
 import numpy as np
@@ -12,11 +24,12 @@ from PySide6.QtGui import QAction, QIcon, QKeySequence, QSurfaceFormat
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
                                QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow,
                                QMessageBox, QProgressBar, QPushButton, QScrollArea,
-                               QSizePolicy, QVBoxLayout, QWidget)
+                               QSlider, QSpinBox, QVBoxLayout, QWidget)
 
 import stl_io
 from version import APP_NAME, VERSION
-from viewer import GLView, R_to_euler, euler_to_R, rot_axis
+import jobs
+from viewer import GLView, R_to_euler, euler_to_R
 
 
 def resource(rel):
@@ -53,11 +66,15 @@ QPushButton#primary:disabled { background: #3a3220; color: #7a6a45; border-color
 QPushButton#teal { border-color: #2dd4bf; color: #2dd4bf; font-weight: 600; }
 QPushButton#teal:hover { background: #12302c; }
 QPushButton#small { padding: 4px 6px; font-family: Consolas, monospace; }
-QDoubleSpinBox, QComboBox {
+QSlider::groove:horizontal { height: 4px; background: #263445; border-radius: 2px; }
+QSlider::sub-page:horizontal { background: #2dd4bf; border-radius: 2px; }
+QSlider::handle:horizontal { background: #f5a524; width: 14px; margin: -6px 0; border-radius: 7px; }
+QLabel#hint { color: #7d8a99; font-size: 8.5pt; }
+QDoubleSpinBox, QSpinBox, QComboBox {
     background: #0b1117; border: 1px solid #263445; border-radius: 6px; padding: 4px 6px;
     font-family: Consolas, monospace; selection-background-color: #2dd4bf; selection-color: #000;
 }
-QDoubleSpinBox:focus, QComboBox:focus { border-color: #2dd4bf; }
+QDoubleSpinBox:focus, QSpinBox:focus, QComboBox:focus { border-color: #2dd4bf; }
 QComboBox QAbstractItemView { background: #111821; border: 1px solid #263445; outline: 0;
     selection-background-color: #1d3a37; }
 QCheckBox::indicator { width: 15px; height: 15px; border-radius: 4px; border: 1px solid #33465a;
@@ -120,6 +137,68 @@ class Worker(QThread):
             self.failed.emit("__abgebrochen__")
         except Exception as e:  # noqa
             self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+class ProcessRunner(QThread):
+    """Startet einen Auftrag aus jobs.py in einem eigenen Prozess."""
+    progress = Signal(int, str)
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, target, *args):
+        super().__init__()
+        self.target, self.args = target, args
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        ctx = multiprocessing.get_context("spawn")
+        q = ctx.Queue()
+        p = ctx.Process(target=self.target, args=(*self.args, q))
+        p.start()
+        finished = False
+        try:
+            while True:
+                if self._cancel:
+                    _kill_tree(p)
+                    self.failed.emit("__abgebrochen__")
+                    return
+                try:
+                    item = q.get(timeout=0.3)
+                except queue_module.Empty:
+                    if not p.is_alive():
+                        break
+                    continue
+                if item[0] == "progress":
+                    self.progress.emit(int(item[1]), str(item[2]))
+                elif item[0] == "done":
+                    finished = True
+                    self.done.emit(item[1])
+                    break
+                elif item[0] == "error":
+                    finished = True
+                    self.failed.emit(item[1])
+                    break
+        finally:
+            p.join(timeout=5)
+            if p.is_alive():
+                _kill_tree(p)
+        if not finished:
+            self.failed.emit("Der Vorgang wurde unerwartet beendet (vermutlich nicht genug "
+                             "Arbeitsspeicher). Bitte stärker vereinfachen und erneut versuchen.")
+
+
+def _kill_tree(p):
+    try:
+        import psutil
+        for c in psutil.Process(p.pid).children(recursive=True):
+            c.kill()
+    except Exception:
+        pass
+    p.terminate()
+    p.join(timeout=5)
 
 
 # ------------------------------------------------------------------ UI-Helfer
@@ -322,6 +401,53 @@ class MainWindow(QMainWindow):
         l.addWidget(self.btn_reset_all)
         side.addWidget(c)
 
+        # Karte: STEP / Vereinfachen (optional) --------------------------
+        c, l = card("Optional: STEP & Vereinfachen")
+        hint = QLabel("Die Ausrichtung („Speichern unter …“) bleibt immer verlustfrei. "
+                      "Diese Funktionen erzeugen zusätzlich eine STEP-Datei bzw. eine "
+                      "vereinfachte STL – jeweils in der aktuellen Ausrichtung.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        l.addWidget(hint)
+        g = QGridLayout()
+        g.setHorizontalSpacing(8)
+        g.setVerticalSpacing(6)
+        lab = QLabel("Vereinfachung")
+        lab.setObjectName("muted")
+        self.sld_dec = QSlider(Qt.Horizontal)
+        self.sld_dec.setRange(1, 100)
+        self.sld_dec.setValue(100)
+        self.lbl_dec = QLabel("100 %")
+        self.lbl_dec.setObjectName("value")
+        self.lbl_dec.setFixedWidth(46)
+        self.sld_dec.valueChanged.connect(lambda v: self.lbl_dec.setText(f"{v} %"))
+        self.sld_dec.setToolTip("Ziel-Anzahl der Dreiecke in Prozent des Originals (100 % = keine Vereinfachung)")
+        g.addWidget(lab, 0, 0)
+        g.addWidget(self.sld_dec, 0, 1)
+        g.addWidget(self.lbl_dec, 0, 2)
+        lab = QLabel("Glättung")
+        lab.setObjectName("muted")
+        self.spn_smooth = QSpinBox()
+        self.spn_smooth.setRange(0, 10)
+        self.spn_smooth.setSuffix(" ×")
+        self.spn_smooth.setToolTip("Taubin-Glättung (Rauschen entfernen), 0 = aus")
+        g.addWidget(lab, 1, 0)
+        g.addWidget(self.spn_smooth, 1, 1, 1, 2)
+        l.addLayout(g)
+        self.chk_merge = QCheckBox("STEP: ebene Flächen zusammenführen")
+        self.chk_detect = QCheckBox("STEP: Zylinder/Kugeln ersetzen")
+        self.chk_nurbs = QCheckBox("STEP: Scan-Oberfläche glätten (NURBS)")
+        self.chk_merge.setChecked(True)
+        self.chk_detect.setChecked(True)
+        for cb in (self.chk_merge, self.chk_detect, self.chk_nurbs):
+            l.addWidget(cb)
+        self.btn_step = QPushButton("Als STEP (.stp) speichern …")
+        self.btn_step.setObjectName("teal")
+        self.btn_simplify = QPushButton("Vereinfacht als STL speichern …")
+        l.addWidget(self.btn_step)
+        l.addWidget(self.btn_simplify)
+        side.addWidget(c)
+
         # Karte: Ansicht --------------------------------------------------
         c, l = card("Ansicht")
         g = QGridLayout()
@@ -371,6 +497,8 @@ class MainWindow(QMainWindow):
         m.addAction(a)
         a = QAction("Speichern unter …", self, shortcut=QKeySequence("Ctrl+Shift+S"), triggered=self.save_dialog)
         m.addAction(a)
+        m.addAction(QAction("Als STEP speichern …", self, triggered=self.step_dialog))
+        m.addAction(QAction("Vereinfacht als STL speichern …", self, triggered=self.simplify_dialog))
         m.addSeparator()
         m.addAction(QAction("Beenden", self, shortcut=QKeySequence.Quit, triggered=self.close))
         m = self.menuBar().addMenu("&Bearbeiten")
@@ -387,6 +515,8 @@ class MainWindow(QMainWindow):
         self.btn_reset_pending.clicked.connect(self.view.reset_pending)
         self.btn_reset_all.clicked.connect(self.reset_all)
         self.btn_cancel.clicked.connect(self.cancel_worker)
+        self.btn_step.clicked.connect(self.step_dialog)
+        self.btn_simplify.clicked.connect(self.simplify_dialog)
         self.cmb_pivot.currentIndexChanged.connect(self.on_pivot)
         self.view.rotationChanged.connect(self.on_rotation_changed)
         self.view.interactionFinished.connect(self.update_dims)
@@ -398,7 +528,7 @@ class MainWindow(QMainWindow):
     def set_enabled(self, has_file):
         busy = self.worker is not None
         for w in (self.btn_save, self.btn_bake, self.btn_reset_pending, self.btn_reset_all,
-                  self.cmb_pivot, *self.spins):
+                  self.cmb_pivot, self.btn_step, self.btn_simplify, *self.spins):
             w.setEnabled(has_file and not busy)
         self.btn_open.setEnabled(not busy)
         self.cmb_detail.setEnabled(not busy)
@@ -557,19 +687,26 @@ class MainWindow(QMainWindow):
         self.view.update()
 
     # ------------------------------------------------------------ Speichern
-    def save_dialog(self):
-        if not self.info or self.worker:
-            return
+    def ask_pending(self) -> bool:
+        """Fragt nach, ob eine noch nicht übernommene Drehung einbezogen werden soll.
+        Gibt False zurück, wenn abgebrochen wurde."""
         if self.has_pending():
             r = QMessageBox.question(
                 self, APP_NAME,
                 "Die aktuell angezeigte Drehung wurde noch nicht mit „Achsen ausrichten“ übernommen.\n\n"
-                "Jetzt übernehmen und mit speichern?",
+                "Jetzt übernehmen und einbeziehen?",
                 QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.Yes)
             if r == QMessageBox.Cancel:
-                return
+                return False
             if r == QMessageBox.Yes:
                 self.bake()
+        return True
+
+    def save_dialog(self):
+        if not self.info or self.worker:
+            return
+        if not self.ask_pending():
+            return
         if stl_io.is_identity(self.view.R_total, self.view.t_total, eps=0):
             r = QMessageBox.question(self, APP_NAME, "Es wurde keine Änderung vorgenommen.\nTrotzdem speichern (1:1-Kopie)?")
             if r != QMessageBox.Yes:
@@ -623,13 +760,125 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText("Fehler beim Speichern.")
             QMessageBox.critical(self, APP_NAME, f"Speichern fehlgeschlagen:\n\n{msg}")
 
+    # ------------------------------------------------------------ STEP / Vereinfachen
+    def _conv_settings(self, decimate):
+        return dict(smoothing_iterations=self.spn_smooth.value(),
+                    decimate_percent=decimate,
+                    merge_planar=self.chk_merge.isChecked(),
+                    detect_curved_shapes=self.chk_detect.isChecked(),
+                    smooth_scan_surfaces=self.chk_nurbs.isChecked(),
+                    worker_count=0)
+
+    def _start_job(self, target, dst, decimate, title):
+        self._workdir = tempfile.mkdtemp(prefix="stl_ausrichter_")
+        self._job_dst = dst
+        R, t = self.view.R_total.copy(), self.view.t_total.copy()
+        self._t0 = time.time()
+        self.busy(True, title)
+        self.worker = ProcessRunner(target, self.info.path, dst, R, t,
+                                    self._conv_settings(decimate), self._workdir)
+        self.worker.progress.connect(self.on_progress)
+        self.set_enabled(False)
+        return self.worker
+
+    def _job_cleanup(self, failed):
+        shutil.rmtree(getattr(self, "_workdir", ""), ignore_errors=True)
+        if failed:
+            for p in (self._job_dst + ".teil", self._job_dst + ".teil.stl"):
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except OSError:
+                    pass
+
+    def step_dialog(self):
+        if not self.info or self.worker or not self.ask_pending():
+            return
+        base = os.path.splitext(self.info.path)[0]
+        p, _ = QFileDialog.getSaveFileName(self, "Als STEP speichern", base + ".stp",
+                                           "STEP-Dateien (*.stp *.step)")
+        if not p:
+            return
+        if not p.lower().endswith((".stp", ".step")):
+            p += ".stp"
+        dec = self.sld_dec.value()
+        w = self._start_job(jobs.step_job, p, dec, "Wandle in STEP um …")
+        w.done.connect(self.on_step_done)
+        w.failed.connect(lambda m: self.on_job_failed(m, "STEP-Umwandlung"))
+        w.start()
+
+    def simplify_dialog(self):
+        if not self.info or self.worker or not self.ask_pending():
+            return
+        if self.sld_dec.value() >= 100 and self.spn_smooth.value() == 0:
+            QMessageBox.information(self, APP_NAME, "Vereinfachung steht auf 100 % und Glättung auf 0 –\n"
+                                    "bitte zuerst einen kleineren Prozentwert einstellen.")
+            return
+        base = os.path.splitext(self.info.path)[0]
+        p, _ = QFileDialog.getSaveFileName(self, "Vereinfachte STL speichern",
+                                           f"{base}_vereinfacht_{self.sld_dec.value()}.stl", "STL-Dateien (*.stl)")
+        if not p:
+            return
+        if not p.lower().endswith(".stl"):
+            p += ".stl"
+        if os.path.normcase(os.path.abspath(p)) == os.path.normcase(os.path.abspath(self.info.path)):
+            QMessageBox.warning(self, APP_NAME, "Die Originaldatei kann hier nicht überschrieben werden.\n"
+                                "Bitte einen anderen Dateinamen wählen.")
+            return
+        w = self._start_job(jobs.simplify_job, p, self.sld_dec.value(), "Vereinfache …")
+        w.done.connect(self.on_simplify_done)
+        w.failed.connect(lambda m: self.on_job_failed(m, "Vereinfachung"))
+        w.start()
+
+    def on_step_done(self, d):
+        self._finish_worker()
+        self._job_cleanup(False)
+        self.set_enabled(True)
+        txt = (f"STEP gespeichert in {time.time() - self._t0:.0f} s:\n{d['path']}\n\n"
+               f"Volumenkörper: {'ja' if d['is_solid'] else 'nein (offene Fläche)'}\n"
+               f"Dreiecke: {fmt_int(d['faces_before'])} → STEP-Flächen: {fmt_int(d['faces_after'])}")
+        if d.get("volume"):
+            txt += f"\nVolumen: {fmt_num(d['volume'], 2)}"
+        rep = [s for s in d.get("shapes", []) if s[2]]
+        if rep:
+            txt += f"\nErsetzte Zylinder/Kugeln: {len(rep)}"
+        self.lbl_status.setText("STEP gespeichert: " + d["path"])
+        QMessageBox.information(self, APP_NAME, txt)
+
+    def on_simplify_done(self, d):
+        self._finish_worker()
+        self._job_cleanup(False)
+        self.set_enabled(True)
+        self.lbl_status.setText("Vereinfachte STL gespeichert: " + d["path"])
+        r = QMessageBox.question(
+            self, APP_NAME,
+            f"Vereinfachte STL gespeichert in {time.time() - self._t0:.0f} s:\n{d['path']}\n\n"
+            f"Dreiecke: {fmt_int(d['faces_before'])} → {fmt_int(d['faces_after'])}\n"
+            f"Größe: {fmt_bytes(os.path.getsize(d['path']))}\n\nVereinfachte Datei jetzt öffnen?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if r == QMessageBox.Yes:
+            self.view.reset_all()
+            self.load(d["path"])
+
+    def on_job_failed(self, msg, what):
+        self._finish_worker()
+        self._job_cleanup(True)
+        self.set_enabled(True)
+        if msg == "__abgebrochen__":
+            self.lbl_status.setText(f"{what} abgebrochen.")
+        else:
+            self.lbl_status.setText(f"{what} fehlgeschlagen.")
+            QMessageBox.critical(self, APP_NAME, f"{what} fehlgeschlagen:\n\n{msg}")
+
     # ------------------------------------------------------------ Sonstiges
     def about(self):
         QMessageBox.about(self, APP_NAME,
                           f"<b>{APP_NAME}</b> v{VERSION}<br><br>"
                           "STL-Dateien frei drehen, X/Y/Z-Achsen gerade ausrichten und<br>"
                           "strukturgleich speichern (Binär: bytegleiche Dateigröße,<br>"
-                          "Header, Reihenfolge und Attribute bleiben erhalten).")
+                          "Header, Reihenfolge und Attribute bleiben erhalten).<br><br>"
+                          "Optional: Umwandlung in STEP (Flächenrückführung aus<br>"
+                          "STL-STEP-Konverter-MK1) und Vereinfachen als STL.")
 
     def dragEnterEvent(self, e):
         md = e.mimeData()
@@ -664,6 +913,7 @@ def _free_space(path):
 
 
 def main():
+    multiprocessing.freeze_support()
     fmt = QSurfaceFormat()
     fmt.setDepthBufferSize(24)
     fmt.setSamples(4)
@@ -684,4 +934,5 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()

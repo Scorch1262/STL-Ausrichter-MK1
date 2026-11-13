@@ -1,3 +1,11 @@
 PySide6>=6.6
 numpy>=1.26
 PyOpenGL>=3.1.7
+# STEP-Umwandlung / Vereinfachen (aus STL-STEP-Konverter-MK1)
+cadquery-ocp-novtk>=8.0.0,<9
+trimesh>=4.0
+scipy>=1.10
+pyransac3d>=0.6
+fast-simplification>=0.1
+psutil>=5.9
+pymeshfix>=0.16

@@ -1,8 +1,13 @@
-# STL-Ausrichter-MK1 · v1.0.0
+# STL-Ausrichter-MK1 · v1.1.0
 
 STL-Dateien öffnen, frei im Raum drehen, die X/Y/Z-Achsen und -Ebenen gerade zur
 angezeigten Lage ausrichten und die Datei **strukturgleich** wieder speichern –
-auch bei STL-Dateien mit mehreren GB.
+auch bei STL-Dateien mit mehreren GB. Optional: Umwandlung in **STEP (.stp)** und
+**Vereinfachen** als STL.
+
+![STL-Ausrichter-MK1](docs/screenshot.png)
+
+Das Programm ist **eine einzelne exe** – ohne daneben liegende Dateien oder Ordner.
 
 ## Bedienung
 
@@ -17,7 +22,9 @@ auch bei STL-Dateien mit mehreren GB.
 | Genau drehen | Winkelfelder X/Y/Z oder Knöpfe −90 / −1 / +1 / +90 |
 | Lage übernehmen | **ACHSEN AUSRICHTEN** (Strg+Enter) |
 | Drehung verwerfen | Esc |
-| Speichern | „Speichern unter …“ (Strg+Umschalt+S) |
+| Ausgerichtet speichern (verlustfrei) | „Speichern unter …“ (Strg+Umschalt+S) |
+| STEP erzeugen (optional) | „Als STEP (.stp) speichern …“ |
+| Vereinfachen (optional) | „Vereinfacht als STL speichern …“ |
 
 Angezeigt werden:
 
@@ -31,7 +38,7 @@ die soeben angezeigte Lage ist jetzt die neue Grundlage des Objekts.
 * *Objektmitte (Lage bleibt)* – das Objekt dreht um seine Mitte, seine Position im Raum bleibt erhalten.
 * *Ursprung 0/0/0* – reine Drehung um den Koordinatenursprung.
 
-## Große Dateien / Datei bleibt unverändert
+## Ausrichten & Speichern – immer ohne Komprimierung
 
 * Die Datei wird **nie komplett in den Arbeitsspeicher geladen**, sondern blockweise gelesen
   und geschrieben. Für die Darstellung wird bei sehr großen Dateien nur jedes n-te Dreieck
@@ -47,12 +54,35 @@ die soeben angezeigte Lage ist jetzt die neue Grundlage des Objekts.
 * Es wird zuerst in `<Ziel>.teil` geschrieben und erst am Ende umbenannt – bei Abbruch oder
   Fehler bleibt die Zieldatei unangetastet. Vor dem Speichern wird der freie Speicherplatz geprüft.
 
+## Optional: STEP-Umwandlung und Vereinfachen
+
+Beide Funktionen sind **nur Zusatzoptionen** und verwenden die aktuelle Ausrichtung.
+Die Originaldatei wird dabei nicht verändert.
+
+* **Als STEP speichern** – Flächenrückführung aus dem Projekt *STL-STEP-Konverter-MK1*
+  (`converter.py`): Dreiecksnetz → Volumenkörper, ebene Flächen zusammenführen, volle
+  Zylinder/Kugeln durch echte Flächen ersetzen, optional Scan-Oberflächen als NURBS glätten.
+  Reicht der Arbeitsspeicher nicht, vereinfacht der Konverter automatisch weiter.
+* **Vereinfacht als STL speichern** – reduziert die Anzahl der Dreiecke (Quadric-Dezimierung)
+  und glättet optional. Jeder Körper der Datei wird einzeln vereinfacht; würde ein Körper dabei
+  zerstört (verschwindet oder ändert seine Maße um mehr als 1 %), bleibt er unverändert.
+  Dieselbe Vorab-Vereinfachung wird auch vor der STEP-Umwandlung genutzt.
+* Einstellungen: *Vereinfachung* (Ziel-Dreiecke in %; bei STEP 100 % = keine Vorab-Vereinfachung),
+  *Glättung* (0–10 Durchgänge), STEP-Optionen.
+* Die Aufträge laufen in einem eigenen Prozess: jederzeit abbrechbar, und selbst ein
+  Speicherengpass beendet nur den Auftrag, nicht das Programm.
+* Hinweis: Für STEP und Vereinfachen wird das Netz vollständig geladen – bei Dateien mit
+  mehreren GB braucht das entsprechend viel Arbeitsspeicher und Zeit.
+
 ## Build
 
 GitHub Actions (`.github/workflows/build-exe.yml`) baut bei jedem Push auf `main`
-die Windows-exe, packt den kompletten Programmordner (exe + `_internal` mit allen
-Bibliotheken) in `STL-Ausrichter-MK1-v<Version>-windows.zip` und legt ein Release an.
-Die Version steht in `version.py`.
+eine **einzelne** `STL-Ausrichter-MK1-v<Version>.exe` (PyInstaller `--onefile`) und legt
+ein Release an (exe direkt + als ZIP). Die Version steht in `version.py`.
+
+Da alles in einer Datei steckt, entpackt die exe beim Start ihre Bibliotheken kurz in den
+Temp-Ordner (wird beim Beenden automatisch entfernt). Der erste Start dauert deshalb
+einige Sekunden länger.
 
 Lokal starten:
 
@@ -60,3 +90,9 @@ Lokal starten:
 pip install -r requirements.txt
 python main.py [datei.stl]
 ```
+
+## Versionen
+
+* **1.1.0** – Eine einzelne exe; STEP-Umwandlung (aus STL-STEP-Konverter-MK1) und Vereinfachen
+  als Option; Screenshot im README.
+* **1.0.0** – Erstversion: Ansicht, Drehen, Achsen ausrichten, verlustfreies Speichern.
